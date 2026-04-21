@@ -1,4 +1,4 @@
-import { rgbToLab, type RGB } from './color';
+import { labToRgb, rgbToLab, type RGB } from './color';
 
 export type DistanceMode = 'lab' | 'rgb';
 
@@ -161,6 +161,68 @@ export function removeColorFlood(
     if (y < height - 1) stack[top++] = p + width;
   }
   return removed;
+}
+
+/**
+ * Precomputed Fibonacci-sphere unit direction vectors (up to 16). A single
+ * fixed list keeps the preview swatches stable as the count animates up and
+ * down — if we regenerated them on each call the existing swatches would
+ * shuffle every time the slider moved.
+ */
+const PREVIEW_DIRECTIONS_3D: { x: number; y: number; z: number }[] = (() => {
+  const out: { x: number; y: number; z: number }[] = [];
+  const N = 16;
+  const golden = Math.PI * (3 - Math.sqrt(5));
+  for (let i = 0; i < N; i++) {
+    const y = 1 - (i / (N - 1)) * 2; // 1 .. -1
+    const r = Math.sqrt(1 - y * y);
+    const theta = golden * i;
+    out.push({ x: Math.cos(theta) * r, y, z: Math.sin(theta) * r });
+  }
+  return out;
+})();
+
+/**
+ * Sample representative colors within the tolerance ball around `picked`.
+ * Returns the picked color as the first entry, followed by `count - 1`
+ * swatches at distance = threshold in evenly-spread directions.
+ */
+export function tolerancePreviewColors(
+  picked: RGB,
+  tolerance: number,
+  mode: DistanceMode,
+  count: number,
+): RGB[] {
+  const out: RGB[] = [picked];
+  const extras = Math.max(0, count - 1);
+  if (extras === 0 || tolerance <= 0) {
+    for (let i = 0; i < extras; i++) out.push(picked);
+    return out;
+  }
+  const threshold = toleranceThreshold(tolerance, mode);
+  if (mode === 'rgb') {
+    for (let i = 0; i < extras; i++) {
+      const d = PREVIEW_DIRECTIONS_3D[i % PREVIEW_DIRECTIONS_3D.length];
+      out.push({
+        r: Math.max(0, Math.min(255, Math.round(picked.r + d.x * threshold))),
+        g: Math.max(0, Math.min(255, Math.round(picked.g + d.y * threshold))),
+        b: Math.max(0, Math.min(255, Math.round(picked.b + d.z * threshold))),
+      });
+    }
+    return out;
+  }
+  const lab = rgbToLab(picked);
+  for (let i = 0; i < extras; i++) {
+    const d = PREVIEW_DIRECTIONS_3D[i % PREVIEW_DIRECTIONS_3D.length];
+    out.push(
+      labToRgb({
+        l: lab.l + d.x * threshold,
+        a: lab.a + d.y * threshold,
+        b: lab.b + d.z * threshold,
+      }),
+    );
+  }
+  return out;
 }
 
 // Sample the four image corners and return the most common color.

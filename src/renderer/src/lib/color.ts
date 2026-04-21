@@ -41,6 +41,28 @@ export function rgbToLab({ r, g, b }: RGB): LAB {
   };
 }
 
+/** Inverse of `rgbToLab`. Clamps out-of-gamut results to valid sRGB. */
+export function labToRgb(lab: LAB): RGB {
+  const fy = (lab.l + 16) / 116;
+  const fx = lab.a / 500 + fy;
+  const fz = fy - lab.b / 200;
+  const fx3 = fx * fx * fx;
+  const fy3 = fy * fy * fy;
+  const fz3 = fz * fz * fz;
+  const X = (fx3 > 0.008856 ? fx3 : (fx - 16 / 116) / 7.787) * 0.95047;
+  const Y = fy3 > 0.008856 ? fy3 : (fy - 16 / 116) / 7.787;
+  const Z = (fz3 > 0.008856 ? fz3 : (fz - 16 / 116) / 7.787) * 1.08883;
+  const linR = 3.2404542 * X + -1.5371385 * Y + -0.4985314 * Z;
+  const linG = -0.9692660 * X + 1.8760108 * Y + 0.0415560 * Z;
+  const linB = 0.0556434 * X + -0.2040259 * Y + 1.0572252 * Z;
+  const toSrgb = (v: number) => {
+    const clamped = Math.max(0, Math.min(1, v));
+    const c = clamped <= 0.0031308 ? 12.92 * clamped : 1.055 * Math.pow(clamped, 1 / 2.4) - 0.055;
+    return Math.max(0, Math.min(255, Math.round(c * 255)));
+  };
+  return { r: toSrgb(linR), g: toSrgb(linG), b: toSrgb(linB) };
+}
+
 export function labDistance(a: LAB, b: LAB): number {
   const dl = a.l - b.l;
   const da = a.a - b.a;

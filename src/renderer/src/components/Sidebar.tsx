@@ -1,4 +1,5 @@
-import type { DistanceMode } from '../lib/bg-removal';
+import { useMemo } from 'react';
+import { tolerancePreviewColors, type DistanceMode } from '../lib/bg-removal';
 import { rgbToHex, type RGB } from '../lib/color';
 
 export interface SidebarProps {
@@ -125,6 +126,7 @@ export function Sidebar(props: SidebarProps) {
       </Section>
 
       <Section title="Tolerance">
+        <TolerancePreview picked={pickedColor} tolerance={tolerance} mode={mode} />
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <input
             type="range"
@@ -219,5 +221,73 @@ function Section({ title, children }: { title: string; children: React.ReactNode
       <label>{title}</label>
       {children}
     </section>
+  );
+}
+
+/**
+ * Preview strip: shows colors that fall inside the current tolerance ball
+ * around the picked color. Count scales with tolerance so a higher setting
+ * visibly "fans out" into more swatches. The picked color is always the first
+ * swatch; the rest sample fixed LAB/RGB directions at distance = threshold,
+ * so swatches stay stable as the slider moves.
+ */
+function TolerancePreview({
+  picked,
+  tolerance,
+  mode,
+}: {
+  picked: RGB | null;
+  tolerance: number;
+  mode: DistanceMode;
+}) {
+  const count = Math.max(3, Math.min(12, Math.round(tolerance / 10) + 3));
+  const colors = useMemo(
+    () => (picked ? tolerancePreviewColors(picked, tolerance, mode, count) : []),
+    [picked, tolerance, mode, count],
+  );
+  return (
+    <div style={{ marginBottom: 6 }}>
+      <div
+        style={{
+          display: 'flex',
+          gap: 2,
+          border: '1px solid var(--border)',
+          borderRadius: 3,
+          padding: 2,
+          background: 'var(--bg)',
+          minHeight: 20,
+        }}
+      >
+        {!picked ? (
+          <div style={{ flex: 1, fontSize: 10, color: 'var(--text-dim)', padding: '2px 4px' }}>
+            Pick a color to preview the tolerance range
+          </div>
+        ) : (
+          colors.map((c, i) => {
+            const hex = rgbToHex(c).toUpperCase();
+            return (
+              <div
+                key={i}
+                title={`${hex} · rgb(${c.r}, ${c.g}, ${c.b})`}
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  height: 18,
+                  background: hex,
+                  borderRadius: 2,
+                  outline: i === 0 ? '1px solid var(--accent)' : 'none',
+                  outlineOffset: i === 0 ? -1 : 0,
+                }}
+              />
+            );
+          })
+        )}
+      </div>
+      <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 2 }}>
+        {picked && colors.length > 0
+          ? `${colors.length} sample${colors.length === 1 ? '' : 's'} · first = picked · rest at distance ${tolerance.toFixed(0)}`
+          : ' '}
+      </div>
+    </div>
   );
 }

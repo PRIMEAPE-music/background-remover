@@ -39,18 +39,19 @@ export function clearRect(
   rw: number,
   rh: number,
 ): void {
+  const iw = image.width;
   const x0 = Math.max(0, Math.floor(rx));
   const y0 = Math.max(0, Math.floor(ry));
-  const x1 = Math.min(image.width, Math.floor(rx + rw));
+  const x1 = Math.min(iw, Math.floor(rx + rw));
   const y1 = Math.min(image.height, Math.floor(ry + rh));
+  const rowBytes = (x1 - x0) * 4;
+  if (rowBytes <= 0) return;
+  const data = image.data;
+  // `Uint8ClampedArray.fill` walks native memory — far faster than a JS-level
+  // nested per-pixel loop when the rect spans many rows.
   for (let y = y0; y < y1; y++) {
-    for (let x = x0; x < x1; x++) {
-      const i = (y * image.width + x) * 4;
-      image.data[i] = 0;
-      image.data[i + 1] = 0;
-      image.data[i + 2] = 0;
-      image.data[i + 3] = 0;
-    }
+    const start = (y * iw + x0) * 4;
+    data.fill(0, start, start + rowBytes);
   }
 }
 
@@ -80,24 +81,57 @@ export function extractRect(
   return new ImageData(out, w, h);
 }
 
-/** Source-over composite `floater` onto `image` at (dx, dy). Returns new ImageData. */
+/**
+ * Source-over composite `floater` onto `image` at (dx, dy). Returns new ImageData.
+ * Pure typed-array pass over just the floater pixels — avoids the two-canvas
+ * + getImageData round-trip (which was 3-4 full-image memcpys) that the old
+ * implementation used. The `image`-sized copy is a single `Uint8ClampedArray`
+ * constructor call.
+ */
 export function compositeOnto(
   image: ImageData,
   floater: ImageData,
   dx: number,
   dy: number,
 ): ImageData {
-  const base = document.createElement('canvas');
-  base.width = image.width;
-  base.height = image.height;
-  const bctx = base.getContext('2d')!;
-  bctx.putImageData(image, 0, 0);
-  const fl = document.createElement('canvas');
-  fl.width = floater.width;
-  fl.height = floater.height;
-  fl.getContext('2d')!.putImageData(floater, 0, 0);
-  bctx.drawImage(fl, dx, dy);
-  return bctx.getImageData(0, 0, image.width, image.height);
+  const iw = image.width;
+  const ih = image.height;
+  const fw = floater.width;
+  const fh = floater.height;
+  const out = new Uint8ClampedArray(image.data); // single memcpy of the base
+  const src = floater.data;
+
+  const x0 = Math.max(0, Math.floor(dx));
+  const y0 = Math.max(0, Math.floor(dy));
+  const x1 = Math.min(iw, Math.floor(dx + fw));
+  const y1 = Math.min(ih, Math.floor(dy + fh));
+
+  for (let y = y0; y < y1; y++) {
+    const sy = y - Math.floor(dy);
+    let si = (sy * fw + (x0 - Math.floor(dx))) * 4;
+    let di = (y * iw + x0) * 4;
+    for (let x = x0; x < x1; x++, si += 4, di += 4) {
+      const sa = src[si + 3];
+      if (sa === 0) continue;
+      if (sa === 255) {
+        // Fast path — sprite pixels are almost always fully opaque or fully
+        // transparent, so this branch covers the vast majority of work.
+        out[di] = src[si];
+        out[di + 1] = src[si + 1];
+        out[di + 2] = src[si + 2];
+        out[di + 3] = 255;
+        continue;
+      }
+      const a = sa / 255;
+      const inv = 1 - a;
+      const da = out[di + 3];
+      out[di] = src[si] * a + out[di] * inv;
+      out[di + 1] = src[si + 1] * a + out[di + 1] * inv;
+      out[di + 2] = src[si + 2] * a + out[di + 2] * inv;
+      out[di + 3] = sa + da * inv;
+    }
+  }
+  return new ImageData(out, iw, ih);
 }
 
 // Cached 2×2-cell pattern canvas, keyed by cell size. Using a repeating

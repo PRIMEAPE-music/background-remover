@@ -216,12 +216,15 @@ export function App() {
       if (!image) return;
       setPickedColor(color);
       if (floodFill) {
-        pushHistory(cloneImageData(image));
+        // The current `image` is immutable by convention (we clone before every
+        // mutation), so we can push it to history directly and only pay for
+        // one clone total — the one we're about to mutate.
         const next = cloneImageData(image);
         removeColorFlood(next.data, next.width, next.height, x, y, {
           tolerance,
           mode: distanceMode,
         });
+        pushHistory(image);
         setImage(next);
       }
     },
@@ -230,11 +233,11 @@ export function App() {
 
   const handleRemoveGlobal = useCallback(() => {
     if (!image || !pickedColor) return;
-    pushHistory(cloneImageData(image));
     const next = cloneImageData(image);
     removeColorGlobal(next.data, pickedColor, { tolerance, mode: distanceMode });
+    pushHistory(image);
     setImage(next);
-  }, [image, pickedColor, tolerance, distanceMode, pushHistory]);
+  }, [image, pickedColor, tolerance, distanceMode, pushHistory, setImage]);
 
   const handleAutoDetect = useCallback(() => {
     if (!image) return;
@@ -427,10 +430,11 @@ export function App() {
       if (ensureLifted && !liftingRef.current) {
         // First move triggers the lift: snapshot, clear source (unless copy), extract floater.
         liftingRef.current = true;
-        // History + liftSnapshot share one clone — both are treated as immutable.
-        const snap = cloneImageData(image);
-        pushHistory(snap);
-        setLiftSnapshot(snap);
+        // `image` is immutable by convention — we clone before every mutation —
+        // so we can share the same reference between history and the lift
+        // snapshot without making an extra full-image copy.
+        pushHistory(image);
+        setLiftSnapshot(image);
         const f = extractRect(
           image,
           selectionRect.x,
@@ -453,7 +457,7 @@ export function App() {
       }
       setSelectionOffset(next);
     },
-    [image, selectionRect, pushHistory],
+    [image, selectionRect, pushHistory, setImage],
   );
 
   const eraseFloater = useCallback(() => {

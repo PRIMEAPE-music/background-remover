@@ -330,7 +330,10 @@ export function detectBlobs(
   const visited = new Uint8Array(width * height);
   const px = data.data;
   const blobs: Rect[] = [];
-  const stack: number[] = [];
+  // Typed-array stack sized to the worst case (every pixel). Using a plain
+  // `number[]` here boxes each index into a JS Number object, which makes the
+  // inner loop allocation-bound on large sheets.
+  const stack = new Int32Array(width * height);
 
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
@@ -345,10 +348,10 @@ export function detectBlobs(
       let minY = y;
       let maxX = x;
       let maxY = y;
-      stack.length = 0;
-      stack.push(start);
-      while (stack.length) {
-        const p = stack.pop()!;
+      let top = 0;
+      stack[top++] = start;
+      while (top > 0) {
+        const p = stack[--top];
         if (visited[p]) continue;
         visited[p] = 1;
         const a = px[p * 4 + 3];
@@ -359,10 +362,10 @@ export function detectBlobs(
         if (px_ > maxX) maxX = px_;
         if (py_ < minY) minY = py_;
         if (py_ > maxY) maxY = py_;
-        if (px_ > 0) stack.push(p - 1);
-        if (px_ < width - 1) stack.push(p + 1);
-        if (py_ > 0) stack.push(p - width);
-        if (py_ < height - 1) stack.push(p + width);
+        if (px_ > 0) stack[top++] = p - 1;
+        if (px_ < width - 1) stack[top++] = p + 1;
+        if (py_ > 0) stack[top++] = p - width;
+        if (py_ < height - 1) stack[top++] = p + width;
       }
       const w = maxX - minX + 1;
       const h = maxY - minY + 1;

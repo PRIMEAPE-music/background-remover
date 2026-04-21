@@ -7,6 +7,7 @@ export interface OpenedImage {
 
 const api = {
   openImages: (): Promise<OpenedImage[]> => ipcRenderer.invoke('dialog:openImage'),
+  openImagePaths: (): Promise<string[]> => ipcRenderer.invoke('dialog:openImagePaths'),
   openFolder: (): Promise<string | null> => ipcRenderer.invoke('dialog:openFolder'),
   saveImage: (defaultName: string, buffer: ArrayBuffer): Promise<string | null> =>
     ipcRenderer.invoke('dialog:saveImage', defaultName, buffer),

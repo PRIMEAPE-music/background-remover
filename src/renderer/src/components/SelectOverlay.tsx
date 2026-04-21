@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Rect } from '../lib/slicing';
 
 export interface SelectOverlayProps {
@@ -9,10 +9,14 @@ export interface SelectOverlayProps {
   selectionRect: Rect | null;
   /** Where the floater is currently drawn (image coords). */
   offset: { x: number; y: number } | null;
+  /** Whether the user has confirmed the drawn selection and is ready to move. */
+  confirmed: boolean;
   /** Pixels lifted from source; null until first move. */
   floater: ImageData | null;
   /** Emitted when user draws a new rect. */
   onDefine: (rect: Rect) => void;
+  /** Emitted to promote a pending (drawn) selection into a confirmed one. */
+  onConfirm: () => void;
   /** Emitted on each move step. `ensureLifted` must be true on the first move after define. */
   onMove: (nextOffset: { x: number; y: number }, ensureLifted: boolean, copy: boolean) => void;
   /** Called to finalize: paste floater into image and clear selection. */
@@ -31,8 +35,10 @@ export function SelectOverlay({
   zoom,
   selectionRect,
   offset,
+  confirmed,
   floater,
   onDefine,
+  onConfirm,
   onMove,
   onCommit,
   onCancel,
@@ -41,6 +47,11 @@ export function SelectOverlay({
   const containerRef = useRef<HTMLDivElement>(null);
   const dragMode = useRef<DragMode>('none');
   const dragStart = useRef({ x: 0, y: 0, origOx: 0, origOy: 0, copy: false });
+  // Local drag offset — updated on every mousemove so the marquee/floater
+  // follows the cursor smoothly without triggering the heavy lift each frame.
+  // The actual lift + image state change only happens on mouseup.
+  const [dragOffset, setDragOffset] = useState<{ x: number; y: number } | null>(null);
+  const displayOffset = dragOffset ?? offset;
 
   const toLocal = (e: React.MouseEvent) => {
     const rect = containerRef.current!.getBoundingClientRect();
@@ -51,27 +62,32 @@ export function SelectOverlay({
   };
 
   const insideSelection = (x: number, y: number): boolean => {
-    if (!selectionRect || !offset) return false;
+    if (!selectionRect || !displayOffset) return false;
     return (
-      x >= offset.x &&
-      y >= offset.y &&
-      x < offset.x + selectionRect.width &&
-      y < offset.y + selectionRect.height
+      x >= displayOffset.x &&
+      y >= displayOffset.y &&
+      x < displayOffset.x + selectionRect.width &&
+      y < displayOffset.y + selectionRect.height
     );
   };
+
+  // Dragging inside the box only MOVES pixels once the selection is confirmed
+  // (or a floater already exists). Otherwise dragging always starts a new selection.
+  const canMoveInside = confirmed || !!floater;
 
   const onMouseDown = (e: React.MouseEvent) => {
     if (e.button !== 0) return;
     const p = toLocal(e);
-    if (selectionRect && offset && insideSelection(p.x, p.y)) {
+    if (selectionRect && displayOffset && canMoveInside && insideSelection(p.x, p.y)) {
       dragMode.current = 'move';
       dragStart.current = {
         x: p.x,
         y: p.y,
-        origOx: offset.x,
-        origOy: offset.y,
+        origOx: displayOffset.x,
+        origOy: displayOffset.y,
         copy: e.altKey,
       };
+      setDragOffset(displayOffset);
     } else {
       if (floater) onCommit();
       dragMode.current = 'define';
@@ -92,18 +108,22 @@ export function SelectOverlay({
         height: Math.round(Math.abs(p.y - dragStart.current.y)),
       });
     } else if (dragMode.current === 'move') {
-      onMove(
-        {
-          x: Math.round(dragStart.current.origOx + (p.x - dragStart.current.x)),
-          y: Math.round(dragStart.current.origOy + (p.y - dragStart.current.y)),
-        },
-        !floater,
-        dragStart.current.copy,
-      );
+      setDragOffset({
+        x: Math.round(dragStart.current.origOx + (p.x - dragStart.current.x)),
+        y: Math.round(dragStart.current.origOy + (p.y - dragStart.current.y)),
+      });
     }
   };
 
   const onMouseUp = () => {
+    if (dragMode.current === 'move' && dragOffset) {
+      const moved =
+        dragOffset.x !== dragStart.current.origOx || dragOffset.y !== dragStart.current.origOy;
+      if (moved) {
+        onMove(dragOffset, !floater, dragStart.current.copy);
+      }
+    }
+    setDragOffset(null);
     dragMode.current = 'none';
   };
 
@@ -117,7 +137,9 @@ export function SelectOverlay({
       }
       if (e.key === 'Enter') {
         e.preventDefault();
-        onCommit();
+        // Enter is a progressive action: unconfirmed → confirm, otherwise commit.
+        if (floater || confirmed) onCommit();
+        else onConfirm();
         return;
       }
       if ((e.key === 'Delete' || e.key === 'Backspace') && floater) {
@@ -133,15 +155,40 @@ export function SelectOverlay({
       else if (e.key === 'ArrowUp') dy = -step;
       else if (e.key === 'ArrowDown') dy = step;
       else return;
+      // Only nudge once the selection has been confirmed (or is already lifted).
+      if (!canMoveInside) return;
       e.preventDefault();
       onMove({ x: offset.x + dx, y: offset.y + dy }, !floater, e.altKey);
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [selectionRect, offset, floater, onMove, onCommit, onCancel, onEraseFloater]);
+  }, [
+    selectionRect,
+    offset,
+    floater,
+    confirmed,
+    canMoveInside,
+    onMove,
+    onCommit,
+    onCancel,
+    onConfirm,
+    onEraseFloater,
+  ]);
 
   const strokeW = 1 / zoom;
   const hasFloat = !!floater;
+  // Three visual states: pending (yellow), confirmed (red), lifted (green).
+  const color = hasFloat ? '#6aff9e' : confirmed ? '#ff6a6a' : '#f0c84a';
+  const bg = hasFloat
+    ? 'rgba(106,255,158,0.06)'
+    : confirmed
+      ? 'rgba(255,106,106,0.06)'
+      : 'rgba(240,200,74,0.08)';
+  const hintText = hasFloat
+    ? 'drag: move · arrows: nudge · enter: commit · esc: revert · del: erase'
+    : confirmed
+      ? 'drag-in-box: move · arrows: nudge · enter: commit · esc: cancel · drag-outside: redraw'
+      : 'drag: draw selection · enter or click "Confirm selection" when ready';
 
   return (
     <div
@@ -153,27 +200,27 @@ export function SelectOverlay({
         width: imageWidth,
         height: imageHeight,
         pointerEvents: 'auto',
-        cursor: selectionRect ? 'move' : 'crosshair',
+        cursor: canMoveInside ? 'move' : 'crosshair',
       }}
       onMouseDown={onMouseDown}
       onMouseMove={onMouseMove}
       onMouseUp={onMouseUp}
       onMouseLeave={onMouseUp}
     >
-      {floater && offset && (
-        <FloaterImage data={floater} x={offset.x} y={offset.y} />
+      {floater && displayOffset && (
+        <FloaterImage data={floater} x={displayOffset.x} y={displayOffset.y} />
       )}
-      {selectionRect && offset && (
+      {selectionRect && displayOffset && (
         <div
           style={{
             position: 'absolute',
-            left: offset.x,
-            top: offset.y,
+            left: displayOffset.x,
+            top: displayOffset.y,
             width: selectionRect.width,
             height: selectionRect.height,
-            border: `${strokeW}px dashed ${hasFloat ? '#6aff9e' : '#ff6a6a'}`,
+            border: `${strokeW}px dashed ${color}`,
             boxSizing: 'border-box',
-            background: hasFloat ? 'rgba(106,255,158,0.06)' : 'rgba(255,106,106,0.06)',
+            background: bg,
             pointerEvents: 'none',
           }}
         />
@@ -192,7 +239,7 @@ export function SelectOverlay({
           borderRadius: 2 / zoom,
         }}
       >
-        drag: select · drag-in-box: move · alt+drag/arrow: copy · arrows: 1px · shift+arrows: 10px · enter: commit · esc: cancel · del: erase
+        {hintText}
       </div>
     </div>
   );

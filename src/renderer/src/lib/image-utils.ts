@@ -3,23 +3,19 @@ export function cloneImageData(src: ImageData): ImageData {
 }
 
 export async function loadImageFromBytes(bytes: Uint8Array, mime = 'image/png'): Promise<ImageData> {
+  // createImageBitmap decodes off the main thread — much faster than going
+  // through an HTMLImageElement, and skips the URL.createObjectURL round-trip.
   const blob = new Blob([bytes as BlobPart], { type: mime });
-  const url = URL.createObjectURL(blob);
+  const bitmap = await createImageBitmap(blob);
   try {
-    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
-      const el = new Image();
-      el.onload = () => resolve(el);
-      el.onerror = () => reject(new Error('Failed to decode image'));
-      el.src = url;
-    });
     const canvas = document.createElement('canvas');
-    canvas.width = img.naturalWidth;
-    canvas.height = img.naturalHeight;
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
     const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
-    ctx.drawImage(img, 0, 0);
-    return ctx.getImageData(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(bitmap, 0, 0);
+    return ctx.getImageData(0, 0, bitmap.width, bitmap.height);
   } finally {
-    URL.revokeObjectURL(url);
+    bitmap.close();
   }
 }
 
@@ -58,7 +54,7 @@ export function clearRect(
   }
 }
 
-/** Extract a rectangular region as a new ImageData. */
+/** Extract a rectangular region as a new ImageData. Copies pixels directly. */
 export function extractRect(
   image: ImageData,
   rx: number,
@@ -66,17 +62,22 @@ export function extractRect(
   rw: number,
   rh: number,
 ): ImageData {
-  const src = document.createElement('canvas');
-  src.width = image.width;
-  src.height = image.height;
-  src.getContext('2d')!.putImageData(image, 0, 0);
-  const dst = document.createElement('canvas');
-  dst.width = rw;
-  dst.height = rh;
-  const ctx = dst.getContext('2d')!;
-  ctx.imageSmoothingEnabled = false;
-  ctx.drawImage(src, rx, ry, rw, rh, 0, 0, rw, rh);
-  return ctx.getImageData(0, 0, rw, rh);
+  const w = Math.max(1, Math.floor(rw));
+  const h = Math.max(1, Math.floor(rh));
+  const out = new Uint8ClampedArray(w * h * 4);
+  const sx0 = Math.max(0, Math.floor(rx));
+  const sy0 = Math.max(0, Math.floor(ry));
+  const sx1 = Math.min(image.width, Math.floor(rx + rw));
+  const sy1 = Math.min(image.height, Math.floor(ry + rh));
+  const srcW = image.width;
+  const src = image.data;
+  for (let y = sy0; y < sy1; y++) {
+    const srcStart = (y * srcW + sx0) * 4;
+    const srcEnd = srcStart + (sx1 - sx0) * 4;
+    const dstStart = ((y - Math.floor(ry)) * w + (sx0 - Math.floor(rx))) * 4;
+    out.set(src.subarray(srcStart, srcEnd), dstStart);
+  }
+  return new ImageData(out, w, h);
 }
 
 /** Source-over composite `floater` onto `image` at (dx, dy). Returns new ImageData. */
@@ -99,17 +100,35 @@ export function compositeOnto(
   return bctx.getImageData(0, 0, image.width, image.height);
 }
 
+// Cached 2×2-cell pattern canvas, keyed by cell size. Using a repeating
+// CanvasPattern collapses the O(w·h/size²) fillRect loop into a single fillRect.
+const checkerPatternCache = new Map<number, HTMLCanvasElement>();
+function checkerPatternCanvas(size: number): HTMLCanvasElement {
+  let off = checkerPatternCache.get(size);
+  if (off) return off;
+  off = document.createElement('canvas');
+  off.width = size * 2;
+  off.height = size * 2;
+  const c = off.getContext('2d')!;
+  c.fillStyle = '#3a3a44';
+  c.fillRect(0, 0, size, size);
+  c.fillRect(size, size, size, size);
+  c.fillStyle = '#4a4a54';
+  c.fillRect(size, 0, size, size);
+  c.fillRect(0, size, size, size);
+  checkerPatternCache.set(size, off);
+  return off;
+}
+
 export function drawCheckerboard(
   ctx: CanvasRenderingContext2D,
   width: number,
   height: number,
   size = 8,
 ): void {
-  for (let y = 0; y < height; y += size) {
-    for (let x = 0; x < width; x += size) {
-      const dark = ((x / size) + (y / size)) % 2 === 0;
-      ctx.fillStyle = dark ? '#3a3a44' : '#4a4a54';
-      ctx.fillRect(x, y, size, size);
-    }
-  }
+  const cellSize = Math.max(1, Math.round(size));
+  const pattern = ctx.createPattern(checkerPatternCanvas(cellSize), 'repeat');
+  if (!pattern) return;
+  ctx.fillStyle = pattern;
+  ctx.fillRect(0, 0, width, height);
 }

@@ -34,7 +34,7 @@ function Swatch({ color, size = 24 }: { color: RGB | null; size?: number }) {
       style={{
         width: size,
         height: size,
-        background: color ? rgbToHex(color) : 'transparent',
+        backgroundColor: color ? rgbToHex(color) : 'transparent',
         border: '1px solid var(--border)',
         borderRadius: 4,
         backgroundImage: color

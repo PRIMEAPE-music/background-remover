@@ -24,10 +24,30 @@ function createWindow(): void {
 
   if (process.env['ELECTRON_RENDERER_URL']) {
     win.loadURL(process.env['ELECTRON_RENDERER_URL']);
-    win.webContents.openDevTools({ mode: 'detach' });
+    // Don't auto-open DevTools — it attaches the React DevTools hook which
+    // snapshots large state/prop values and can stall setState by seconds.
+    // Toggle with Ctrl+Shift+I when you need it.
   } else {
     win.loadFile(join(__dirname, '../renderer/index.html'));
   }
+
+  // F5 / Ctrl+R to reload; Ctrl+Shift+I to toggle DevTools.
+  win.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown') return;
+    const key = input.key.toLowerCase();
+    if (key === 'f5' || (input.control && key === 'r')) {
+      win.webContents.reloadIgnoringCache();
+      event.preventDefault();
+    } else if (input.control && input.shift && key === 'i') {
+      if (win.webContents.isDevToolsOpened()) win.webContents.closeDevTools();
+      else win.webContents.openDevTools({ mode: 'detach' });
+      event.preventDefault();
+    } else if (key === 'f12') {
+      if (win.webContents.isDevToolsOpened()) win.webContents.closeDevTools();
+      else win.webContents.openDevTools({ mode: 'detach' });
+      event.preventDefault();
+    }
+  });
 }
 
 ipcMain.handle('dialog:openImage', async () => {
@@ -43,6 +63,17 @@ ipcMain.handle('dialog:openImage', async () => {
       data: await readFile(path),
     })),
   );
+});
+
+// Dialog-only: lets the renderer time the picker separately from the file read.
+ipcMain.handle('dialog:openImagePaths', async () => {
+  const result = await dialog.showOpenDialog({
+    title: 'Select image(s)',
+    properties: ['openFile', 'multiSelections'],
+    filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif'] }],
+  });
+  if (result.canceled) return [];
+  return result.filePaths;
 });
 
 ipcMain.handle('dialog:openFolder', async () => {

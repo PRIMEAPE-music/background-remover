@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Toolbar, type ViewMode } from './components/Toolbar';
 import { Sidebar } from './components/Sidebar';
 import { SliceSidebar } from './components/SliceSidebar';
@@ -33,12 +33,46 @@ import {
 } from './lib/slicing';
 import { loadPresets, savePresets, type SavedPreset } from './lib/presets';
 
-const MAX_UNDO = 20;
+// Undo history is bounded by both count and total pixel bytes, because each
+// entry is a full ImageData clone — at 4K+ resolution a few clones can be
+// hundreds of MB, which can OOM the renderer.
+const MAX_UNDO_COUNT = 10;
+const MAX_UNDO_BYTES = 400 * 1024 * 1024;
 
 export function App() {
-  const [image, setImage] = useState<ImageData | null>(null);
+  // Image pixels live in a ref — NEVER in React state or props. React/DevTools
+  // snapshotting multi-MB ImageData through the reconciler was adding seconds
+  // per setState. `imageMeta` is a tiny state value that changes whenever the
+  // pixels change, giving components something cheap to depend on.
+  const imageRef = useRef<ImageData | null>(null);
+  const imageVersionRef = useRef(0);
+  const [imageMeta, setImageMeta] = useState<{
+    width: number;
+    height: number;
+    version: number;
+  } | null>(null);
+  const image = imageRef.current;
+
+  const setImage = useCallback((next: ImageData | null) => {
+    imageRef.current = next;
+    if (next) {
+      imageVersionRef.current++;
+      setImageMeta({
+        width: next.width,
+        height: next.height,
+        version: imageVersionRef.current,
+      });
+    } else {
+      setImageMeta(null);
+    }
+  }, []);
+
   const [filepath, setFilepath] = useState<string | null>(null);
-  const [history, setHistory] = useState<ImageData[]>([]);
+  // History is also held in a ref so the array of ImageData clones never goes
+  // through the reconciler. A small state counter triggers UI updates
+  // (undo-enabled button).
+  const historyRef = useRef<ImageData[]>([]);
+  const [historyLen, setHistoryLen] = useState(0);
 
   const [mode, setMode] = useState<ViewMode>('remove');
 
@@ -59,24 +93,56 @@ export function App() {
   // Select+Move state
   const [selectionRect, setSelectionRect] = useState<Rect | null>(null);
   const [selectionOffset, setSelectionOffset] = useState<{ x: number; y: number } | null>(null);
+  const [selectionConfirmed, setSelectionConfirmed] = useState(false);
   const [floater, setFloater] = useState<ImageData | null>(null);
   const [liftSnapshot, setLiftSnapshot] = useState<ImageData | null>(null);
+  // React may not have rendered floater=truthy by the time the next mousemove
+  // fires, so guard against double-lift with a ref.
+  const liftingRef = useRef(false);
 
   useEffect(() => setPresets(loadPresets()), []);
 
   const pushHistory = useCallback((prev: ImageData) => {
-    setHistory((h) => {
-      const next = [...h, prev];
-      if (next.length > MAX_UNDO) next.shift();
-      return next;
-    });
+    const h = historyRef.current;
+    h.push(prev);
+    while (h.length > MAX_UNDO_COUNT) h.shift();
+    let bytes = 0;
+    for (const e of h) bytes += e.data.byteLength;
+    while (h.length > 1 && bytes > MAX_UNDO_BYTES) {
+      bytes -= h[0].data.byteLength;
+      h.shift();
+    }
+    setHistoryLen(h.length);
   }, []);
 
-  const openImage = useCallback(async () => {
-    const results = await window.api.openImages();
-    if (results.length === 0) return;
-    const first = results[0];
-    const ext = first.path.split('.').pop()?.toLowerCase();
+  const clearHistory = useCallback(() => {
+    historyRef.current = [];
+    setHistoryLen(0);
+  }, []);
+
+  const popHistory = useCallback((): ImageData | null => {
+    const h = historyRef.current;
+    if (h.length === 0) return null;
+    const prev = h.pop()!;
+    setHistoryLen(h.length);
+    return prev;
+  }, []);
+
+  const dropLastHistory = useCallback(() => {
+    const h = historyRef.current;
+    if (h.length === 0) return;
+    h.pop();
+    setHistoryLen(h.length);
+  }, []);
+
+  const appRenderCount = useRef(0);
+  appRenderCount.current++;
+  if (appRenderCount.current % 5 === 1) {
+    console.log('[perf] App render #', appRenderCount.current, 'at', performance.now().toFixed(0));
+  }
+
+  const ingestImage = useCallback(async (path: string, bytes: Uint8Array) => {
+    const ext = path.split('.').pop()?.toLowerCase();
     const mime =
       ext === 'jpg' || ext === 'jpeg'
         ? 'image/jpeg'
@@ -87,17 +153,43 @@ export function App() {
             : ext === 'gif'
               ? 'image/gif'
               : 'image/png';
-    const data = await loadImageFromBytes(first.data, mime);
-    setImage(data);
-    setFilepath(first.path);
-    setHistory([]);
+    // Drop the old image + history BEFORE starting the decode, so we don't
+    // briefly hold both (which can OOM for large images with undo history).
+    setImage(null);
+    setFilepath(null);
+    clearHistory();
     setPickedColor(null);
     setSelectedCellIndex(null);
     setSelectionRect(null);
     setSelectionOffset(null);
+    setSelectionConfirmed(false);
     setFloater(null);
     setLiftSnapshot(null);
-  }, []);
+    liftingRef.current = false;
+    await new Promise<void>((r) => setTimeout(r, 0));
+    const data = await loadImageFromBytes(bytes, mime);
+    setImage(data);
+    setFilepath(path);
+  }, [setImage, clearHistory]);
+
+  const openImage = useCallback(async () => {
+    const paths = await window.api.openImagePaths();
+    if (paths.length === 0) return;
+    const bytes = await window.api.readFile(paths[0]);
+    await ingestImage(paths[0], bytes);
+  }, [ingestImage]);
+
+  const handleFileDrop = useCallback(
+    async (file: File) => {
+      console.log('[perf] drop received at', performance.now().toFixed(1));
+      const t0 = performance.now();
+      const buf = new Uint8Array(await file.arrayBuffer());
+      console.log('[perf] blob read', (performance.now() - t0).toFixed(1), 'ms');
+      await ingestImage(file.name, buf);
+      console.log('[perf] ingest returned', (performance.now() - t0).toFixed(1), 'ms');
+    },
+    [ingestImage],
+  );
 
   const saveImage = useCallback(async () => {
     if (!image) return;
@@ -107,6 +199,17 @@ export function App() {
     const bytes = await imageDataToPngBytes(image);
     await window.api.saveImage(`${base}_transparent.png`, bytes);
   }, [image, filepath]);
+
+  const handleHover = useCallback((x: number, y: number, c: RGB | null) => {
+    setHoverPos(x < 0 ? null : { x, y });
+    setHoverColor(c);
+  }, []);
+
+  const handleViewportChange = useCallback((z: number) => {
+    setViewZoom(z);
+  }, []);
+
+  const getImage = useCallback(() => imageRef.current, []);
 
   const handlePick = useCallback(
     (x: number, y: number, color: RGB) => {
@@ -139,16 +242,17 @@ export function App() {
   }, [image]);
 
   const handleUndo = useCallback(() => {
-    if (history.length === 0) return;
-    const prev = history[history.length - 1];
-    setHistory((h) => h.slice(0, -1));
+    const prev = popHistory();
+    if (!prev) return;
     setImage(prev);
     // Any in-flight selection is invalidated by undo.
     setFloater(null);
     setLiftSnapshot(null);
     setSelectionRect(null);
     setSelectionOffset(null);
-  }, [history]);
+    setSelectionConfirmed(false);
+    liftingRef.current = false;
+  }, [popHistory, setImage]);
 
   // ---- Slice / export ----
   const cells = useMemo(
@@ -156,12 +260,16 @@ export function App() {
     [slice, image],
   );
 
+  // Only compute the per-cell processed previews when the user is actually in
+  // slice mode. This is a heavy operation (per-cell full-image putImageData +
+  // content-bounds scan) and re-running it on every image load was the main
+  // cause of the long stall after dropping a new image.
   const processedCells = useMemo(() => {
-    if (!image) return [] as ImageData[];
+    if (!image || mode !== 'slice') return [] as ImageData[];
     return cells.map((r, i) =>
       extractAndNormalizeCell(image, r, slice.overrides[i], slice.normalize),
     );
-  }, [image, cells, slice.overrides, slice.normalize]);
+  }, [image, cells, slice.overrides, slice.normalize, mode]);
 
   const joinPath = (folder: string, filename: string) => {
     const sep = folder.includes('\\') ? '\\' : '/';
@@ -267,6 +375,8 @@ export function App() {
       setLiftSnapshot(null);
       setSelectionRect(null);
       setSelectionOffset(null);
+      setSelectionConfirmed(false);
+      liftingRef.current = false;
       return;
     }
     // The snapshot was pushed to history at lift-time; now composite the floater.
@@ -276,35 +386,51 @@ export function App() {
     setLiftSnapshot(null);
     setSelectionRect(null);
     setSelectionOffset(null);
+    setSelectionConfirmed(false);
+    liftingRef.current = false;
   }, [image, floater, selectionOffset]);
 
   const cancelSelection = useCallback(() => {
     if (liftSnapshot) {
       setImage(liftSnapshot);
-      setHistory((h) => h.slice(0, -1));
+      dropLastHistory();
     }
     setFloater(null);
     setLiftSnapshot(null);
     setSelectionRect(null);
     setSelectionOffset(null);
-  }, [liftSnapshot]);
+    setSelectionConfirmed(false);
+    liftingRef.current = false;
+  }, [liftSnapshot, setImage, dropLastHistory]);
 
   const defineSelection = useCallback(
     (rect: Rect) => {
       if (floater) return;
       setSelectionRect(rect);
       setSelectionOffset({ x: rect.x, y: rect.y });
+      // Drawing a new selection always un-confirms — user has to re-approve.
+      setSelectionConfirmed(false);
     },
     [floater],
   );
 
+  const confirmSelection = useCallback(() => {
+    if (!selectionRect) return;
+    if (selectionRect.width <= 0 || selectionRect.height <= 0) return;
+    setSelectionConfirmed(true);
+  }, [selectionRect]);
+
   const moveSelection = useCallback(
     (next: { x: number; y: number }, ensureLifted: boolean, copy: boolean) => {
       if (!image || !selectionRect) return;
-      if (ensureLifted) {
+      if (selectionRect.width <= 0 || selectionRect.height <= 0) return;
+      if (ensureLifted && !liftingRef.current) {
         // First move triggers the lift: snapshot, clear source (unless copy), extract floater.
-        pushHistory(cloneImageData(image));
-        setLiftSnapshot(cloneImageData(image));
+        liftingRef.current = true;
+        // History + liftSnapshot share one clone — both are treated as immutable.
+        const snap = cloneImageData(image);
+        pushHistory(snap);
+        setLiftSnapshot(snap);
         const f = extractRect(
           image,
           selectionRect.x,
@@ -334,6 +460,8 @@ export function App() {
     setFloater(null);
     setSelectionRect(null);
     setSelectionOffset(null);
+    setSelectionConfirmed(false);
+    liftingRef.current = false;
   }, []);
 
   // Auto-commit or cancel when leaving select mode.
@@ -410,8 +538,10 @@ export function App() {
       zoom={viewZoom}
       selectionRect={selectionRect}
       offset={selectionOffset}
+      confirmed={selectionConfirmed}
       floater={floater}
       onDefine={defineSelection}
+      onConfirm={confirmSelection}
       onMove={moveSelection}
       onCommit={commitFloater}
       onCancel={cancelSelection}
@@ -420,7 +550,19 @@ export function App() {
   ) : null;
 
   return (
-    <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+    <div
+      style={{ height: '100%', display: 'flex', flexDirection: 'column' }}
+      onDragOver={(e) => {
+        if (e.dataTransfer.types.includes('Files')) e.preventDefault();
+      }}
+      onDrop={(e) => {
+        if (!e.dataTransfer.files.length) return;
+        e.preventDefault();
+        const file = e.dataTransfer.files[0];
+        if (!/\.(png|jpe?g|webp|bmp|gif)$/i.test(file.name)) return;
+        handleFileDrop(file);
+      }}
+    >
       <Toolbar
         filename={filepath}
         hasImage={!!image}
@@ -431,14 +573,12 @@ export function App() {
       />
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
         <CanvasView
-          image={image}
+          imageMeta={imageMeta}
+          getImage={getImage}
           onPick={mode === 'remove' ? handlePick : undefined}
-          onHover={(x, y, c) => {
-            setHoverPos(x < 0 ? null : { x, y });
-            setHoverColor(c);
-          }}
+          onHover={handleHover}
           pickEnabled={mode === 'remove'}
-          onViewportChange={(z) => setViewZoom(z)}
+          onViewportChange={handleViewportChange}
         >
           {sliceOverlay}
           {selectOverlay}
@@ -458,7 +598,7 @@ export function App() {
             onRemoveGlobal={handleRemoveGlobal}
             onAutoDetect={handleAutoDetect}
             onUndo={handleUndo}
-            canUndo={history.length > 0}
+            canUndo={historyLen > 0}
             hasImage={!!image}
           />
         ) : mode === 'slice' ? (
@@ -486,10 +626,12 @@ export function App() {
             hasImage={!!image}
             hasSelection={!!selectionRect}
             hasFloater={!!floater}
+            selectionConfirmed={selectionConfirmed}
+            onConfirm={confirmSelection}
             onCommit={commitFloater}
             onCancel={cancelSelection}
             onUndo={handleUndo}
-            canUndo={history.length > 0}
+            canUndo={historyLen > 0}
           />
         )}
       </div>
@@ -501,6 +643,8 @@ function SelectSidebar({
   hasImage,
   hasSelection,
   hasFloater,
+  selectionConfirmed,
+  onConfirm,
   onCommit,
   onCancel,
   onUndo,
@@ -509,11 +653,14 @@ function SelectSidebar({
   hasImage: boolean;
   hasSelection: boolean;
   hasFloater: boolean;
+  selectionConfirmed: boolean;
+  onConfirm: () => void;
   onCommit: () => void;
   onCancel: () => void;
   onUndo: () => void;
   canUndo: boolean;
 }) {
+  const canConfirm = hasSelection && !selectionConfirmed && !hasFloater;
   return (
     <aside
       style={{
@@ -531,8 +678,9 @@ function SelectSidebar({
         <label>Select + Move</label>
         <div style={{ fontSize: 11, color: 'var(--text-dim)', lineHeight: 1.5 }}>
           Use this to re-space overlapping sprites before slicing.
-          <br />• Drag on the image to draw a selection rectangle.
-          <br />• Drag inside the selection to lift and move the pixels.
+          <br />• Drag on the image to draw a selection rectangle (yellow).
+          <br />• Click Confirm (or press Enter) to lock it in (red).
+          <br />• Drag inside the confirmed box to lift and move the pixels (green).
           <br />• Alt + drag (or alt + arrow) makes a copy instead.
           <br />• Arrows nudge by 1px, shift+arrows by 10px.
           <br />• Enter commits · Escape reverts.
@@ -542,7 +690,14 @@ function SelectSidebar({
       <section>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           <button
-            className="primary"
+            className={canConfirm ? 'primary' : undefined}
+            onClick={onConfirm}
+            disabled={!canConfirm}
+          >
+            Confirm selection
+          </button>
+          <button
+            className={hasFloater ? 'primary' : undefined}
             onClick={onCommit}
             disabled={!hasFloater}
           >

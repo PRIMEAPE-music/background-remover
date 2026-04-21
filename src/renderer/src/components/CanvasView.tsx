@@ -18,7 +18,10 @@ export interface CanvasViewHandle {
 }
 
 export interface CanvasViewProps {
-  image: ImageData | null;
+  /** Tiny descriptor of the current image — drives re-renders without flowing ImageData through props. */
+  imageMeta: { width: number; height: number; version: number } | null;
+  /** Lazy accessor for the actual ImageData pixels. */
+  getImage: () => ImageData | null;
   /** Called with image-space pixel coordinates on a left-click that isn't a pan. */
   onPick?: (x: number, y: number, color: RGB) => void;
   onHover?: (x: number, y: number, color: RGB | null) => void;
@@ -30,13 +33,22 @@ export interface CanvasViewProps {
   onViewportChange?: (zoom: number, pan: { x: number; y: number }) => void;
 }
 
+let CV_RENDER_COUNT = 0;
 export const CanvasView = forwardRef<CanvasViewHandle, CanvasViewProps>(function CanvasView(
-  { image, onPick, onHover, children, pickEnabled = true, onViewportChange },
+  { imageMeta, getImage, onPick, onHover, children, pickEnabled = true, onViewportChange },
   ref,
 ) {
+  CV_RENDER_COUNT++;
+  if (CV_RENDER_COUNT % 10 === 1) {
+    console.log('[perf] CanvasView render #', CV_RENDER_COUNT, 'at', performance.now().toFixed(0));
+  }
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const imageCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  // Render source is an ImageBitmap — created off-thread from the ImageData
+  // so we don't block the main thread with a full putImageData on every
+  // image change. The ImageData prop remains the source of truth for pixels.
+  const imageBitmapRef = useRef<ImageBitmap | null>(null);
+  const imageDimsRef = useRef<{ w: number; h: number } | null>(null);
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [isPanning, setIsPanning] = useState(false);
@@ -44,29 +56,53 @@ export const CanvasView = forwardRef<CanvasViewHandle, CanvasViewProps>(function
 
   const fit = useCallback(() => {
     const container = containerRef.current;
-    const img = imageCanvasRef.current;
-    if (!container || !img) return;
+    const dims = imageDimsRef.current;
+    if (!container || !dims) return;
     const { clientWidth: cw, clientHeight: ch } = container;
-    const scale = Math.min(cw / img.width, ch / img.height, 1) * 0.9;
+    const scale = Math.min(cw / dims.w, ch / dims.h, 1) * 0.9;
     setZoom(scale);
-    setPan({ x: (cw - img.width * scale) / 2, y: (ch - img.height * scale) / 2 });
+    setPan({ x: (cw - dims.w * scale) / 2, y: (ch - dims.h * scale) / 2 });
   }, []);
 
   useEffect(() => {
-    if (!image) {
-      imageCanvasRef.current = null;
+    const img = getImage();
+    if (!img) {
+      imageBitmapRef.current?.close();
+      imageBitmapRef.current = null;
+      imageDimsRef.current = null;
       render();
       return;
     }
-    const off = document.createElement('canvas');
-    off.width = image.width;
-    off.height = image.height;
-    off.getContext('2d')!.putImageData(image, 0, 0);
-    imageCanvasRef.current = off;
-    fit();
-  }, [image]);
+    const prev = imageDimsRef.current;
+    const dimsChanged = !prev || prev.w !== img.width || prev.h !== img.height;
+    imageDimsRef.current = { w: img.width, h: img.height };
+    let cancelled = false;
+    const t0 = performance.now();
+    console.log('[perf] CanvasView effect start', performance.now().toFixed(1));
+    createImageBitmap(img).then((bitmap) => {
+      console.log('[perf] bitmap ready', (performance.now() - t0).toFixed(1), 'ms');
+      if (cancelled) {
+        bitmap.close();
+        return;
+      }
+      imageBitmapRef.current?.close();
+      imageBitmapRef.current = bitmap;
+      if (dimsChanged) fit();
+      else render();
+      requestAnimationFrame(() => {
+        console.log('[perf] frame 1 after bitmap', (performance.now() - t0).toFixed(1), 'ms');
+        requestAnimationFrame(() => {
+          console.log('[perf] frame 2 after bitmap', (performance.now() - t0).toFixed(1), 'ms');
+        });
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [imageMeta]);
 
   const render = useCallback(() => {
+    const rStart = performance.now();
     const canvas = canvasRef.current;
     const container = containerRef.current;
     if (!canvas || !container) return;
@@ -84,7 +120,7 @@ export const CanvasView = forwardRef<CanvasViewHandle, CanvasViewProps>(function
     ctx.imageSmoothingEnabled = false;
     ctx.fillStyle = '#1e1e22';
     ctx.fillRect(0, 0, cw, ch);
-    const img = imageCanvasRef.current;
+    const img = imageBitmapRef.current;
     if (!img) return;
     const w = img.width * zoom;
     const h = img.height * zoom;
@@ -96,6 +132,7 @@ export const CanvasView = forwardRef<CanvasViewHandle, CanvasViewProps>(function
     ctx.lineWidth = 1;
     ctx.strokeRect(0.5, 0.5, w - 1, h - 1);
     ctx.restore();
+    console.log('[perf] render() drew image', (performance.now() - rStart).toFixed(1), 'ms');
   }, [zoom, pan]);
 
   useEffect(() => {
@@ -114,14 +151,13 @@ export const CanvasView = forwardRef<CanvasViewHandle, CanvasViewProps>(function
 
   const screenToImage = useCallback(
     (sx: number, sy: number) => {
-      const img = imageCanvasRef.current;
-      if (!img) return null;
+      if (!imageMeta) return null;
       const x = Math.floor((sx - pan.x) / zoom);
       const y = Math.floor((sy - pan.y) / zoom);
-      if (x < 0 || y < 0 || x >= img.width || y >= img.height) return null;
+      if (x < 0 || y < 0 || x >= imageMeta.width || y >= imageMeta.height) return null;
       return { x, y };
     },
-    [pan, zoom],
+    [pan, zoom, imageMeta],
   );
 
   useImperativeHandle(
@@ -135,13 +171,16 @@ export const CanvasView = forwardRef<CanvasViewHandle, CanvasViewProps>(function
     [fit, screenToImage, zoom, pan],
   );
 
-  const pickAt = useCallback((x: number, y: number): RGB | null => {
-    const img = imageCanvasRef.current;
-    if (!img) return null;
-    const { data } = img.getContext('2d')!.getImageData(x, y, 1, 1);
-    if (data[3] === 0) return null;
-    return { r: data[0], g: data[1], b: data[2] };
-  }, []);
+  const pickAt = useCallback(
+    (x: number, y: number): RGB | null => {
+      const img = getImage();
+      if (!img) return null;
+      const i = (y * img.width + x) * 4;
+      if (img.data[i + 3] === 0) return null;
+      return { r: img.data[i], g: img.data[i + 1], b: img.data[i + 2] };
+    },
+    [getImage],
+  );
 
   const onMouseDown = (e: React.MouseEvent) => {
     if (e.button === 1 || (e.button === 0 && e.altKey)) {
@@ -216,14 +255,14 @@ export const CanvasView = forwardRef<CanvasViewHandle, CanvasViewProps>(function
       onContextMenu={(e) => e.preventDefault()}
     >
       <canvas ref={canvasRef} style={{ display: 'block', pointerEvents: 'none' }} />
-      {image && children && (
+      {imageMeta && children && (
         <div
           style={{
             position: 'absolute',
             left: 0,
             top: 0,
-            width: image.width,
-            height: image.height,
+            width: imageMeta.width,
+            height: imageMeta.height,
             transformOrigin: '0 0',
             transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
             pointerEvents: 'none',
@@ -232,7 +271,7 @@ export const CanvasView = forwardRef<CanvasViewHandle, CanvasViewProps>(function
           {children}
         </div>
       )}
-      {image && (
+      {imageMeta && (
         <div
           style={{
             position: 'absolute',
@@ -246,10 +285,10 @@ export const CanvasView = forwardRef<CanvasViewHandle, CanvasViewProps>(function
             pointerEvents: 'none',
           }}
         >
-          {image.width}×{image.height} · {Math.round(zoom * 100)}% · alt+drag to pan · wheel to zoom
+          {imageMeta.width}×{imageMeta.height} · {Math.round(zoom * 100)}% · alt+drag to pan · wheel to zoom
         </div>
       )}
-      {image && (
+      {imageMeta && (
         <button
           onClick={fit}
           style={{ position: 'absolute', top: 8, right: 8, fontSize: 11, padding: '4px 8px' }}

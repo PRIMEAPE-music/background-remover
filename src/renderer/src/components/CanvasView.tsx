@@ -29,19 +29,34 @@ export interface CanvasViewProps {
   children?: ReactNode;
   /** Set to false to disable click-to-pick (e.g. when a slice tool owns clicks). */
   pickEnabled?: boolean;
+  /** When true, left-drag paints transparency via `onErase` instead of picking. */
+  eraserEnabled?: boolean;
+  /** Brush radius in image pixels; also used to draw the cursor preview. */
+  eraserBrushSize?: number;
+  /** Fired on every mousedown/move sample while erasing. `isStart` is true on the first sample of a stroke. */
+  onErase?: (x: number, y: number, isStart: boolean) => void;
+  /** Fired when the erase stroke ends (mouseup / mouseleave). */
+  onEraseEnd?: () => void;
   /** Called whenever zoom changes so overlays can size strokes/handles. */
   onViewportChange?: (zoom: number, pan: { x: number; y: number }) => void;
 }
 
-let CV_RENDER_COUNT = 0;
 export const CanvasView = forwardRef<CanvasViewHandle, CanvasViewProps>(function CanvasView(
-  { imageMeta, getImage, onPick, onHover, children, pickEnabled = true, onViewportChange },
+  {
+    imageMeta,
+    getImage,
+    onPick,
+    onHover,
+    children,
+    pickEnabled = true,
+    eraserEnabled = false,
+    eraserBrushSize = 10,
+    onErase,
+    onEraseEnd,
+    onViewportChange,
+  },
   ref,
 ) {
-  CV_RENDER_COUNT++;
-  if (CV_RENDER_COUNT % 10 === 1) {
-    console.log('[perf] CanvasView render #', CV_RENDER_COUNT, 'at', performance.now().toFixed(0));
-  }
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   // Render source is an ImageBitmap — created off-thread from the ImageData
@@ -53,6 +68,10 @@ export const CanvasView = forwardRef<CanvasViewHandle, CanvasViewProps>(function
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [isPanning, setIsPanning] = useState(false);
   const panStart = useRef({ x: 0, y: 0, panX: 0, panY: 0 });
+  const [isErasing, setIsErasing] = useState(false);
+  // Track the last cursor in image coords while erasing so we can show a
+  // cursor preview at the right spot. Also cached for brush-circle overlay.
+  const [cursorImage, setCursorImage] = useState<{ x: number; y: number } | null>(null);
 
   const fit = useCallback(() => {
     const container = containerRef.current;
@@ -77,10 +96,7 @@ export const CanvasView = forwardRef<CanvasViewHandle, CanvasViewProps>(function
     const dimsChanged = !prev || prev.w !== img.width || prev.h !== img.height;
     imageDimsRef.current = { w: img.width, h: img.height };
     let cancelled = false;
-    const t0 = performance.now();
-    console.log('[perf] CanvasView effect start', performance.now().toFixed(1));
     createImageBitmap(img).then((bitmap) => {
-      console.log('[perf] bitmap ready', (performance.now() - t0).toFixed(1), 'ms');
       if (cancelled) {
         bitmap.close();
         return;
@@ -89,12 +105,6 @@ export const CanvasView = forwardRef<CanvasViewHandle, CanvasViewProps>(function
       imageBitmapRef.current = bitmap;
       if (dimsChanged) fit();
       else render();
-      requestAnimationFrame(() => {
-        console.log('[perf] frame 1 after bitmap', (performance.now() - t0).toFixed(1), 'ms');
-        requestAnimationFrame(() => {
-          console.log('[perf] frame 2 after bitmap', (performance.now() - t0).toFixed(1), 'ms');
-        });
-      });
     });
     return () => {
       cancelled = true;
@@ -102,7 +112,6 @@ export const CanvasView = forwardRef<CanvasViewHandle, CanvasViewProps>(function
   }, [imageMeta]);
 
   const render = useCallback(() => {
-    const rStart = performance.now();
     const canvas = canvasRef.current;
     const container = containerRef.current;
     if (!canvas || !container) return;
@@ -132,7 +141,6 @@ export const CanvasView = forwardRef<CanvasViewHandle, CanvasViewProps>(function
     ctx.lineWidth = 1;
     ctx.strokeRect(0.5, 0.5, w - 1, h - 1);
     ctx.restore();
-    console.log('[perf] render() drew image', (performance.now() - rStart).toFixed(1), 'ms');
   }, [zoom, pan]);
 
   useEffect(() => {
@@ -187,6 +195,15 @@ export const CanvasView = forwardRef<CanvasViewHandle, CanvasViewProps>(function
       setIsPanning(true);
       panStart.current = { x: e.clientX, y: e.clientY, panX: pan.x, panY: pan.y };
       e.preventDefault();
+      return;
+    }
+    if (eraserEnabled && e.button === 0) {
+      const rect = containerRef.current!.getBoundingClientRect();
+      const p = screenToImage(e.clientX - rect.left, e.clientY - rect.top);
+      if (!p) return;
+      setIsErasing(true);
+      onErase?.(p.x, p.y, true);
+      e.preventDefault();
     }
   };
 
@@ -202,6 +219,12 @@ export const CanvasView = forwardRef<CanvasViewHandle, CanvasViewProps>(function
     const sx = e.clientX - rect.left;
     const sy = e.clientY - rect.top;
     const p = screenToImage(sx, sy);
+    if (eraserEnabled) {
+      setCursorImage(p ? { x: p.x, y: p.y } : null);
+      if (isErasing && p) {
+        onErase?.(p.x, p.y, false);
+      }
+    }
     if (p) {
       onHover?.(p.x, p.y, pickAt(p.x, p.y));
     } else {
@@ -209,9 +232,16 @@ export const CanvasView = forwardRef<CanvasViewHandle, CanvasViewProps>(function
     }
   };
 
-  const onMouseUp = () => setIsPanning(false);
+  const onMouseUp = () => {
+    setIsPanning(false);
+    if (isErasing) {
+      setIsErasing(false);
+      onEraseEnd?.();
+    }
+  };
 
   const onClick = (e: React.MouseEvent) => {
+    if (eraserEnabled) return; // stroke already handled in mousedown/move/up
     if (!pickEnabled) return;
     if (e.button !== 0 || e.altKey || isPanning) return;
     const rect = containerRef.current!.getBoundingClientRect();
@@ -241,7 +271,13 @@ export const CanvasView = forwardRef<CanvasViewHandle, CanvasViewProps>(function
         position: 'relative',
         flex: 1,
         overflow: 'hidden',
-        cursor: isPanning ? 'grabbing' : pickEnabled ? 'crosshair' : 'default',
+        cursor: isPanning
+          ? 'grabbing'
+          : eraserEnabled
+            ? 'none'
+            : pickEnabled
+              ? 'crosshair'
+              : 'default',
       }}
       onWheel={onWheel}
       onMouseDown={onMouseDown}
@@ -249,6 +285,11 @@ export const CanvasView = forwardRef<CanvasViewHandle, CanvasViewProps>(function
       onMouseUp={onMouseUp}
       onMouseLeave={() => {
         setIsPanning(false);
+        if (isErasing) {
+          setIsErasing(false);
+          onEraseEnd?.();
+        }
+        setCursorImage(null);
         onHover?.(-1, -1, null);
       }}
       onClick={onClick}
@@ -270,6 +311,23 @@ export const CanvasView = forwardRef<CanvasViewHandle, CanvasViewProps>(function
         >
           {children}
         </div>
+      )}
+      {eraserEnabled && cursorImage && (
+        <div
+          style={{
+            position: 'absolute',
+            left: cursorImage.x * zoom + pan.x,
+            top: cursorImage.y * zoom + pan.y,
+            width: eraserBrushSize * 2 * zoom,
+            height: eraserBrushSize * 2 * zoom,
+            marginLeft: -eraserBrushSize * zoom,
+            marginTop: -eraserBrushSize * zoom,
+            borderRadius: '50%',
+            border: '1px solid #ff6a6a',
+            boxShadow: '0 0 0 1px rgba(0,0,0,0.6)',
+            pointerEvents: 'none',
+          }}
+        />
       )}
       {imageMeta && (
         <div

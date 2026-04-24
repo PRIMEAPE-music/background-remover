@@ -1,4 +1,4 @@
-export type ViewMode = 'remove' | 'select' | 'slice';
+export type ViewMode = 'remove' | 'select' | 'slice' | 'builder';
 
 export interface ToolbarProps {
   filename: string | null;
@@ -30,7 +30,7 @@ export function Toolbar({ filename, hasImage, mode, onModeChange, onOpen, onSave
       <div style={{ width: 1, height: 22, background: 'var(--border)', margin: '0 6px' }} />
 
       <div style={{ display: 'flex', gap: 4 }}>
-        {(['remove', 'select', 'slice'] as const).map((m) => (
+        {(['remove', 'select', 'slice', 'builder'] as const).map((m) => (
           <button
             key={m}
             className={mode === m ? 'primary' : ''}
@@ -38,7 +38,13 @@ export function Toolbar({ filename, hasImage, mode, onModeChange, onOpen, onSave
             style={{ textTransform: 'capitalize' }}
             disabled={!hasImage}
           >
-            {m === 'remove' ? 'Remove BG' : m === 'select' ? 'Select + Move' : 'Slice'}
+            {m === 'remove'
+              ? 'Remove BG'
+              : m === 'select'
+                ? 'Select + Move'
+                : m === 'slice'
+                  ? 'Slice'
+                  : 'Builder'}
           </button>
         ))}
       </div>

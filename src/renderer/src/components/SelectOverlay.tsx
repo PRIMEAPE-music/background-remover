@@ -1,20 +1,26 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Rect } from '../lib/slicing';
+import { polygonBounds, polygonToPath, type Point } from '../lib/lasso';
+
+export type SelectTool = 'rect' | 'lasso';
 
 export interface SelectOverlayProps {
   imageWidth: number;
   imageHeight: number;
   zoom: number;
+  tool: SelectTool;
   /** Source rect in image coords (if any selection). */
   selectionRect: Rect | null;
+  /** Lasso polygon in image coords (null if rectangle selection). */
+  lassoPolygon: Point[] | null;
   /** Where the floater is currently drawn (image coords). */
   offset: { x: number; y: number } | null;
   /** Whether the user has confirmed the drawn selection and is ready to move. */
   confirmed: boolean;
   /** Pixels lifted from source; null until first move. */
   floater: ImageData | null;
-  /** Emitted when user draws a new rect. */
-  onDefine: (rect: Rect) => void;
+  /** Emitted when user draws a new rect (rectangle tool) or the bbox of a lasso. */
+  onDefine: (rect: Rect, polygon: Point[] | null) => void;
   /** Emitted to promote a pending (drawn) selection into a confirmed one. */
   onConfirm: () => void;
   /** Emitted on each move step. `ensureLifted` must be true on the first move after define. */
@@ -27,13 +33,15 @@ export interface SelectOverlayProps {
   onEraseFloater: () => void;
 }
 
-type DragMode = 'none' | 'define' | 'move';
+type DragMode = 'none' | 'define' | 'lasso' | 'move';
 
 export function SelectOverlay({
   imageWidth,
   imageHeight,
   zoom,
+  tool,
   selectionRect,
+  lassoPolygon,
   offset,
   confirmed,
   floater,
@@ -51,6 +59,7 @@ export function SelectOverlay({
   // follows the cursor smoothly without triggering the heavy lift each frame.
   // The actual lift + image state change only happens on mouseup.
   const [dragOffset, setDragOffset] = useState<{ x: number; y: number } | null>(null);
+  const [lassoDraft, setLassoDraft] = useState<Point[] | null>(null);
   const displayOffset = dragOffset ?? offset;
 
   const toLocal = (e: React.MouseEvent) => {
@@ -90,9 +99,14 @@ export function SelectOverlay({
       setDragOffset(displayOffset);
     } else {
       if (floater) onCommit();
-      dragMode.current = 'define';
-      dragStart.current = { x: p.x, y: p.y, origOx: 0, origOy: 0, copy: false };
-      onDefine({ x: Math.round(p.x), y: Math.round(p.y), width: 0, height: 0 });
+      if (tool === 'lasso') {
+        dragMode.current = 'lasso';
+        setLassoDraft([{ x: p.x, y: p.y }]);
+      } else {
+        dragMode.current = 'define';
+        dragStart.current = { x: p.x, y: p.y, origOx: 0, origOy: 0, copy: false };
+        onDefine({ x: Math.round(p.x), y: Math.round(p.y), width: 0, height: 0 }, null);
+      }
     }
     e.stopPropagation();
   };
@@ -101,11 +115,22 @@ export function SelectOverlay({
     if (dragMode.current === 'none') return;
     const p = toLocal(e);
     if (dragMode.current === 'define') {
-      onDefine({
-        x: Math.round(Math.min(dragStart.current.x, p.x)),
-        y: Math.round(Math.min(dragStart.current.y, p.y)),
-        width: Math.round(Math.abs(p.x - dragStart.current.x)),
-        height: Math.round(Math.abs(p.y - dragStart.current.y)),
+      onDefine(
+        {
+          x: Math.round(Math.min(dragStart.current.x, p.x)),
+          y: Math.round(Math.min(dragStart.current.y, p.y)),
+          width: Math.round(Math.abs(p.x - dragStart.current.x)),
+          height: Math.round(Math.abs(p.y - dragStart.current.y)),
+        },
+        null,
+      );
+    } else if (dragMode.current === 'lasso') {
+      setLassoDraft((draft) => {
+        if (!draft) return [{ x: p.x, y: p.y }];
+        const last = draft[draft.length - 1];
+        // Throttle points by pixel distance so dense drags don't explode state.
+        if (Math.hypot(p.x - last.x, p.y - last.y) < 1.5) return draft;
+        return [...draft, { x: p.x, y: p.y }];
       });
     } else if (dragMode.current === 'move') {
       setDragOffset({
@@ -122,8 +147,14 @@ export function SelectOverlay({
       if (moved) {
         onMove(dragOffset, !floater, dragStart.current.copy);
       }
+    } else if (dragMode.current === 'lasso' && lassoDraft && lassoDraft.length >= 3) {
+      const bbox = polygonBounds(lassoDraft);
+      if (bbox && bbox.width > 2 && bbox.height > 2) {
+        onDefine(bbox, lassoDraft);
+      }
     }
     setDragOffset(null);
+    setLassoDraft(null);
     dragMode.current = 'none';
   };
 
@@ -188,7 +219,14 @@ export function SelectOverlay({
     ? 'drag: move · arrows: nudge · enter: commit · esc: revert · del: erase'
     : confirmed
       ? 'drag-in-box: move · arrows: nudge · enter: commit · esc: cancel · drag-outside: redraw'
-      : 'drag: draw selection · enter or click "Confirm selection" when ready';
+      : tool === 'lasso'
+        ? 'drag: trace a lasso · enter or "Confirm selection" when ready'
+        : 'drag: draw selection · enter or "Confirm selection" when ready';
+  // Show the polygon outline while drawing (draft) or post-define until lifted.
+  const polyToShow: Point[] | null =
+    dragMode.current === 'lasso' ? lassoDraft : !hasFloat ? lassoPolygon : null;
+  const polyOffsetDx = displayOffset && selectionRect ? displayOffset.x - selectionRect.x : 0;
+  const polyOffsetDy = displayOffset && selectionRect ? displayOffset.y - selectionRect.y : 0;
 
   return (
     <div
@@ -220,10 +258,34 @@ export function SelectOverlay({
             height: selectionRect.height,
             border: `${strokeW}px dashed ${color}`,
             boxSizing: 'border-box',
-            background: bg,
+            background: lassoPolygon ? 'transparent' : bg,
             pointerEvents: 'none',
           }}
         />
+      )}
+      {polyToShow && polyToShow.length >= 2 && (
+        <svg
+          style={{
+            position: 'absolute',
+            left: 0,
+            top: 0,
+            width: imageWidth,
+            height: imageHeight,
+            pointerEvents: 'none',
+            overflow: 'visible',
+          }}
+        >
+          <path
+            d={polygonToPath(
+              polyToShow.map((p) => ({ x: p.x + polyOffsetDx, y: p.y + polyOffsetDy })),
+            )}
+            fill={bg}
+            stroke={color}
+            strokeWidth={strokeW}
+            strokeDasharray={`${3 / zoom} ${2 / zoom}`}
+            vectorEffect="non-scaling-stroke"
+          />
+        </svg>
       )}
       <div
         style={{

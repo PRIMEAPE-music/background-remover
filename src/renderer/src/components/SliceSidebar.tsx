@@ -1,4 +1,6 @@
-import { FRAME_SIZE_PRESETS, gridFromCellSize, type AnchorKind, type SliceConfig } from '../lib/slicing';
+import { useState } from 'react';
+import { FRAME_SIZE_PRESETS, gridFromCellSize, type AnchorKind, type Rect, type SliceConfig } from '../lib/slicing';
+import type { BoxesTool } from './slice/BoxesOverlay';
 import type { SavedPreset } from '../lib/presets';
 import { AnimationPreview } from './AnimationPreview';
 
@@ -8,13 +10,24 @@ export interface SliceSidebarProps {
   imageWidth: number;
   imageHeight: number;
   cellCount: number;
-  previewFrames: ImageData[];
+  /**
+   * Stable callback returning the active source's ImageData. Kept as a
+   * callback (plus `previewSourceId` primitive) instead of passing the raw
+   * ImageData — React 19 dev mode walks props during reconciliation, and
+   * large ImageData buffers in the prop tree caused multi-second freezes
+   * on source switches even when AnimationPreview wasn't mounted.
+   */
+  getPreviewSource: (id: string | null) => ImageData | null;
+  previewSourceId: string | null;
+  previewCells: Rect[];
   selectedCellIndex: number | null;
   onSelectedCellIndexChange: (i: number | null) => void;
   onExportCells: () => void;
   onExportAtlas: () => void;
-  onAutoDetectBlobs: () => void;
+  onAutoDetectBlobs: (mergeGap: number) => void;
   onAutoRepack: () => void;
+  boxesTool: BoxesTool;
+  onBoxesToolChange: (t: BoxesTool) => void;
   canExport: boolean;
   presets: SavedPreset[];
   onSavePreset: (name: string) => void;
@@ -35,13 +48,17 @@ export function SliceSidebar(props: SliceSidebarProps) {
     imageWidth,
     imageHeight,
     cellCount,
-    previewFrames,
+    getPreviewSource,
+    previewSourceId,
+    previewCells,
     selectedCellIndex,
     onSelectedCellIndexChange,
     onExportCells,
     onExportAtlas,
     onAutoDetectBlobs,
     onAutoRepack,
+    boxesTool,
+    onBoxesToolChange,
     canExport,
     presets,
     onSavePreset,
@@ -114,6 +131,8 @@ export function SliceSidebar(props: SliceSidebarProps) {
           imageWidth={imageWidth}
           imageHeight={imageHeight}
           onAutoDetectBlobs={onAutoDetectBlobs}
+          tool={boxesTool}
+          onToolChange={onBoxesToolChange}
         />
       )}
 
@@ -164,10 +183,13 @@ export function SliceSidebar(props: SliceSidebarProps) {
 
       <NormalizeSection config={config} onConfigChange={onConfigChange} />
 
-      <section>
-        <label>Animation preview</label>
-        <AnimationPreview frames={previewFrames} />
-      </section>
+      <PreviewSection
+        getSource={getPreviewSource}
+        sourceId={previewSourceId}
+        cells={previewCells}
+        overrides={config.overrides}
+        normalize={config.normalize}
+      />
 
       <section>
         <label>Export</label>
@@ -191,6 +213,60 @@ export function SliceSidebar(props: SliceSidebarProps) {
         onDelete={onDeletePreset}
       />
     </aside>
+  );
+}
+
+/**
+ * Preview renders only when the user explicitly enables it. Source-switch
+ * interactions don't mount AnimationPreview unless the user has opted in, so
+ * rapid clicking between sheets stays free of any extraction work.
+ */
+function PreviewSection({
+  getSource,
+  sourceId,
+  cells,
+  overrides,
+  normalize,
+}: {
+  getSource: (id: string | null) => ImageData | null;
+  sourceId: string | null;
+  cells: Rect[];
+  overrides: Record<number, import('../lib/slicing').CellOverride>;
+  normalize: import('../lib/slicing').NormalizationOptions;
+}) {
+  const [enabled, setEnabled] = useState(false);
+  // Only resolve the ImageData reference when the preview is actively enabled;
+  // otherwise keep the 17MB buffer entirely out of this subtree's prop tree.
+  const source = enabled ? getSource(sourceId) : null;
+  return (
+    <section>
+      <label>Animation preview</label>
+      {enabled ? (
+        <>
+          <AnimationPreview
+            source={source}
+            cells={cells}
+            overrides={overrides}
+            normalize={normalize}
+          />
+          <button
+            onClick={() => setEnabled(false)}
+            style={{ marginTop: 6, width: '100%', fontSize: 11 }}
+          >
+            Hide preview
+          </button>
+        </>
+      ) : (
+        <button
+          onClick={() => setEnabled(true)}
+          disabled={!sourceId || cells.length === 0}
+          style={{ width: '100%' }}
+          title="Preview animates through all cells. Hidden by default so source-switch reconciliation stays cheap."
+        >
+          Show preview
+        </button>
+      )}
+    </section>
   );
 }
 
@@ -333,23 +409,66 @@ function BoxesControls({
   imageWidth,
   imageHeight,
   onAutoDetectBlobs,
+  tool,
+  onToolChange,
 }: {
   config: SliceConfig;
   onConfigChange: (c: SliceConfig) => void;
   selectedIndex: number | null;
   imageWidth: number;
   imageHeight: number;
-  onAutoDetectBlobs: () => void;
+  onAutoDetectBlobs: (mergeGap: number) => void;
+  tool: BoxesTool;
+  onToolChange: (t: BoxesTool) => void;
 }) {
   const selected = selectedIndex !== null ? config.boxes.rects[selectedIndex] : null;
+  const [mergeGap, setMergeGap] = useState(8);
   return (
     <>
       <section>
-        <button onClick={onAutoDetectBlobs} className="primary" style={{ width: '100%' }}>
+        <label>Draw tool</label>
+        <div style={{ display: 'flex', gap: 4, marginTop: 4 }}>
+          {(['rect', 'lasso'] as const).map((t) => (
+            <button
+              key={t}
+              className={tool === t ? 'primary' : ''}
+              onClick={() => onToolChange(t)}
+              style={{ flex: 1, textTransform: 'capitalize' }}
+            >
+              {t === 'rect' ? 'Rectangle' : 'Lasso'}
+            </button>
+          ))}
+        </div>
+        <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 4 }}>
+          Lasso: trace around a sprite (including loose particles) and a bounding box is created for you.
+        </div>
+      </section>
+      <section>
+        <button onClick={() => onAutoDetectBlobs(mergeGap)} className="primary" style={{ width: '100%' }}>
           Auto-detect sprite blobs
         </button>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 6, fontSize: 11 }}>
+          <span style={{ flex: 1 }}>Merge gap</span>
+          <input
+            type="range"
+            min={0}
+            max={64}
+            value={mergeGap}
+            onChange={(e) => setMergeGap(Number(e.target.value))}
+            style={{ flex: 2 }}
+          />
+          <input
+            type="number"
+            min={0}
+            max={256}
+            value={mergeGap}
+            onChange={(e) => setMergeGap(Math.max(0, Number(e.target.value) || 0))}
+            style={{ width: 48 }}
+          />
+        </label>
         <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 4 }}>
-          Finds every opaque region and creates boxes around them. Run after removing background.
+          Finds every opaque region and creates boxes. Increase <em>merge gap</em> to group detached
+          particles/FX into one sprite. Run after removing background.
         </div>
       </section>
       <section>

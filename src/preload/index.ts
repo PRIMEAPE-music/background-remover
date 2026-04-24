@@ -17,6 +17,7 @@ const api = {
     ipcRenderer.invoke('fs:readFile', filePath),
   writeFile: (filePath: string, buffer: ArrayBuffer): Promise<string> =>
     ipcRenderer.invoke('fs:writeFile', filePath, buffer),
+  mkdir: (dirPath: string): Promise<string> => ipcRenderer.invoke('fs:mkdir', dirPath),
 };
 
 contextBridge.exposeInMainWorld('api', api);

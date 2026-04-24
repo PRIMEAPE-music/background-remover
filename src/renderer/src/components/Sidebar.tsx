@@ -14,10 +14,19 @@ export interface SidebarProps {
   hoverPos: { x: number; y: number } | null;
   onPickedColorChange: (c: RGB | null) => void;
   onRemoveGlobal: () => void;
+  onRemoveGlobalAllSources: () => void;
   onAutoDetect: () => void;
   onUndo: () => void;
   canUndo: boolean;
   hasImage: boolean;
+  sourceCount: number;
+  /** Saved color swatches (persistent in localStorage). */
+  swatches: (RGB | null)[];
+  onSwatchesChange: (s: (RGB | null)[]) => void;
+  tool: 'pick' | 'erase';
+  onToolChange: (t: 'pick' | 'erase') => void;
+  eraseBrushSize: number;
+  onEraseBrushSizeChange: (n: number) => void;
 }
 
 const BG_PRESETS: { name: string; color: RGB }[] = [
@@ -61,10 +70,18 @@ export function Sidebar(props: SidebarProps) {
     hoverPos,
     onPickedColorChange,
     onRemoveGlobal,
+    onRemoveGlobalAllSources,
     onAutoDetect,
     onUndo,
     canUndo,
     hasImage,
+    sourceCount,
+    swatches,
+    onSwatchesChange,
+    tool,
+    onToolChange,
+    eraseBrushSize,
+    onEraseBrushSizeChange,
   } = props;
 
   return (
@@ -80,6 +97,53 @@ export function Sidebar(props: SidebarProps) {
         gap: 16,
       }}
     >
+      <Section title="Tool">
+        <div style={{ display: 'flex', gap: 4 }}>
+          {(['pick', 'erase'] as const).map((t) => (
+            <button
+              key={t}
+              onClick={() => onToolChange(t)}
+              className={tool === t ? 'primary' : ''}
+              style={{ flex: 1, textTransform: 'capitalize', fontSize: 11 }}
+            >
+              {t === 'pick' ? 'Pick color' : 'Eraser'}
+            </button>
+          ))}
+        </div>
+        {tool === 'erase' && (
+          <>
+            <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 8 }}>
+              Brush size: {eraseBrushSize}px
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
+              <input
+                type="range"
+                min={1}
+                max={200}
+                step={1}
+                value={eraseBrushSize}
+                onChange={(e) => onEraseBrushSizeChange(Number(e.target.value))}
+                style={{ flex: 1 }}
+              />
+              <input
+                type="number"
+                min={1}
+                max={2000}
+                value={eraseBrushSize}
+                onChange={(e) =>
+                  onEraseBrushSizeChange(Math.max(1, Math.round(Number(e.target.value) || 1)))
+                }
+                style={{ width: 60 }}
+              />
+            </div>
+            <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 4, lineHeight: 1.4 }}>
+              Click + drag on the canvas to paint transparency. Undo rolls back the whole stroke.
+              Alt+drag to pan as usual.
+            </div>
+          </>
+        )}
+      </Section>
+
       <Section title="Picked color">
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           <Swatch color={pickedColor} size={32} />
@@ -122,6 +186,38 @@ export function Sidebar(props: SidebarProps) {
               <span style={{ fontSize: 11 }}>{p.name}</span>
             </button>
           ))}
+        </div>
+      </Section>
+
+      <Section title="Saved swatches">
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 6 }}>
+          {swatches.map((sw, i) => (
+            <SwatchSlot
+              key={i}
+              color={sw}
+              hasPicked={!!pickedColor}
+              onClick={() => {
+                if (sw) {
+                  // Saved swatch → pick it
+                  onPickedColorChange(sw);
+                } else if (pickedColor) {
+                  // Empty slot → save current picked color into it
+                  const next = [...swatches];
+                  next[i] = pickedColor;
+                  onSwatchesChange(next);
+                }
+              }}
+              onRightClick={() => {
+                const next = [...swatches];
+                next[i] = null;
+                onSwatchesChange(next);
+              }}
+            />
+          ))}
+        </div>
+        <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 4 }}>
+          Click an empty slot with a color picked to save it. Click a filled
+          slot to re-pick that color. Right-click to clear.
         </div>
       </Section>
 
@@ -190,7 +286,18 @@ export function Sidebar(props: SidebarProps) {
             onClick={onRemoveGlobal}
             disabled={!hasImage || !pickedColor}
           >
-            Remove picked color
+            Remove picked color (active)
+          </button>
+          <button
+            onClick={onRemoveGlobalAllSources}
+            disabled={!pickedColor || sourceCount < 2}
+            title={
+              sourceCount < 2
+                ? 'Load more than one source to batch-apply'
+                : 'Runs the picked color + tolerance across every loaded source'
+            }
+          >
+            Remove picked color (all {sourceCount} sources)
           </button>
           <button onClick={onUndo} disabled={!canUndo}>
             Undo
@@ -221,6 +328,51 @@ function Section({ title, children }: { title: string; children: React.ReactNode
       <label>{title}</label>
       {children}
     </section>
+  );
+}
+
+function SwatchSlot({
+  color,
+  hasPicked,
+  onClick,
+  onRightClick,
+}: {
+  color: RGB | null;
+  hasPicked: boolean;
+  onClick: () => void;
+  onRightClick: () => void;
+}) {
+  const empty = !color;
+  return (
+    <button
+      onClick={onClick}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        onRightClick();
+      }}
+      disabled={empty && !hasPicked}
+      title={
+        empty
+          ? hasPicked
+            ? 'Save picked color here'
+            : 'Pick a color first, then click to save'
+          : `${rgbToHex(color).toUpperCase()} · click to re-pick, right-click to clear`
+      }
+      style={{
+        width: 32,
+        height: 32,
+        padding: 0,
+        background: color ? rgbToHex(color) : 'transparent',
+        backgroundImage: empty
+          ? 'linear-gradient(45deg, #3a3a44 25%, transparent 25%), linear-gradient(-45deg, #3a3a44 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #3a3a44 75%), linear-gradient(-45deg, transparent 75%, #3a3a44 75%)'
+          : undefined,
+        backgroundSize: '6px 6px',
+        backgroundPosition: '0 0, 0 3px, 3px -3px, -3px 0',
+        border: '1px solid var(--border)',
+        borderRadius: 3,
+        cursor: empty && !hasPicked ? 'not-allowed' : 'pointer',
+      }}
+    />
   );
 }
 

@@ -225,17 +225,49 @@ export function contentBounds(data: ImageData, alphaThreshold = 0): Rect | null 
  *   3. Optionally trim transparent borders
  *   4. Optionally paste into a normalized target canvas with anchor + scaling
  */
+/**
+ * One-shot source canvas prep — upload the full image into a canvas once so
+ * subsequent per-cell extractions can cheap-crop via drawImage instead of
+ * re-uploading the entire image buffer per cell.
+ */
+export function sourceImageToCanvas(source: ImageData): HTMLCanvasElement {
+  const srcCanvas = document.createElement('canvas');
+  srcCanvas.width = source.width;
+  srcCanvas.height = source.height;
+  srcCanvas.getContext('2d')!.putImageData(source, 0, 0);
+  return srcCanvas;
+}
+
+/**
+ * Batched variant — prepares the source canvas once, then extracts every cell.
+ * Much faster than calling `extractAndNormalizeCell` N times for large sheets.
+ */
+export function extractAllCells(
+  source: ImageData,
+  rects: Rect[],
+  overrides: Record<number, CellOverride>,
+  normalize: NormalizationOptions,
+): ImageData[] {
+  if (rects.length === 0) return [];
+  const srcCanvas = sourceImageToCanvas(source);
+  return rects.map((r, i) => extractCellFromCanvas(srcCanvas, r, overrides[i], normalize));
+}
+
 export function extractAndNormalizeCell(
   source: ImageData,
   rect: Rect,
   override: CellOverride | undefined,
   normalize: NormalizationOptions,
 ): ImageData {
-  const srcCanvas = document.createElement('canvas');
-  srcCanvas.width = source.width;
-  srcCanvas.height = source.height;
-  srcCanvas.getContext('2d')!.putImageData(source, 0, 0);
+  return extractCellFromCanvas(sourceImageToCanvas(source), rect, override, normalize);
+}
 
+export function extractCellFromCanvas(
+  srcCanvas: HTMLCanvasElement,
+  rect: Rect,
+  override: CellOverride | undefined,
+  normalize: NormalizationOptions,
+): ImageData {
   const cropped = document.createElement('canvas');
   cropped.width = rect.width;
   cropped.height = rect.height;
@@ -319,12 +351,18 @@ export function extractAndNormalizeCell(
   return tctx.getImageData(0, 0, target.width, target.height);
 }
 
-/** Detect connected opaque blobs and return their bounding boxes. */
+/**
+ * Detect connected opaque blobs and return their bounding boxes.
+ * `mergeGap` (px) unions any two blobs whose bounding boxes sit within that
+ * distance of each other — useful when a sprite has detached particles/FX
+ * that should belong to the same frame.
+ */
 export function detectBlobs(
   data: ImageData,
   minSize = 16,
   padding = 0,
   alphaThreshold = 0,
+  mergeGap = 0,
 ): Rect[] {
   const { width, height } = data;
   const visited = new Uint8Array(width * height);
@@ -379,12 +417,46 @@ export function detectBlobs(
       }
     }
   }
+  if (mergeGap > 0 && blobs.length > 1) mergeNearbyRects(blobs, mergeGap);
+
   // Sort blobs roughly left-to-right, top-to-bottom using rows (grouping y-proximity).
   blobs.sort((a, b) => {
     if (Math.abs(a.y - b.y) > Math.min(a.height, b.height) / 2) return a.y - b.y;
     return a.x - b.x;
   });
   return blobs;
+}
+
+function mergeNearbyRects(rects: Rect[], gap: number): void {
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (let i = 0; i < rects.length; i++) {
+      for (let j = i + 1; j < rects.length; j++) {
+        const a = rects[i];
+        const b = rects[j];
+        const ax2 = a.x + a.width;
+        const ay2 = a.y + a.height;
+        const bx2 = b.x + b.width;
+        const by2 = b.y + b.height;
+        const xOverlap = a.x - gap < bx2 && ax2 + gap > b.x;
+        const yOverlap = a.y - gap < by2 && ay2 + gap > b.y;
+        if (xOverlap && yOverlap) {
+          const nx = Math.min(a.x, b.x);
+          const ny = Math.min(a.y, b.y);
+          rects[i] = {
+            x: nx,
+            y: ny,
+            width: Math.max(ax2, bx2) - nx,
+            height: Math.max(ay2, by2) - ny,
+          };
+          rects.splice(j, 1);
+          changed = true;
+          j--;
+        }
+      }
+    }
+  }
 }
 
 /**

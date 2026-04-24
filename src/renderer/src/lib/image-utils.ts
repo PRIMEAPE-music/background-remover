@@ -2,6 +2,90 @@ export function cloneImageData(src: ImageData): ImageData {
   return new ImageData(new Uint8ClampedArray(src.data), src.width, src.height);
 }
 
+/**
+ * Zero the alpha of every pixel inside a filled circle (cx, cy, radius).
+ * Mutates `data` in place — caller is responsible for history + version bump.
+ */
+export function eraseCircle(
+  data: Uint8ClampedArray,
+  imageW: number,
+  imageH: number,
+  cx: number,
+  cy: number,
+  radius: number,
+): void {
+  const r = Math.max(0, Math.floor(radius));
+  if (r === 0) {
+    const x = Math.floor(cx);
+    const y = Math.floor(cy);
+    if (x >= 0 && y >= 0 && x < imageW && y < imageH) {
+      data[(y * imageW + x) * 4 + 3] = 0;
+    }
+    return;
+  }
+  const r2 = r * r;
+  const x0 = Math.max(0, Math.floor(cx - r));
+  const y0 = Math.max(0, Math.floor(cy - r));
+  const x1 = Math.min(imageW - 1, Math.floor(cx + r));
+  const y1 = Math.min(imageH - 1, Math.floor(cy + r));
+  for (let y = y0; y <= y1; y++) {
+    const dy = y - cy;
+    const rowStart = y * imageW * 4;
+    for (let x = x0; x <= x1; x++) {
+      const dx = x - cx;
+      if (dx * dx + dy * dy <= r2) {
+        data[rowStart + x * 4 + 3] = 0;
+      }
+    }
+  }
+}
+
+/**
+ * Thick line from (x0,y0) to (x1,y1) of `radius` — interpolated sample
+ * circles every pixel of the travel distance so fast drags don't leave gaps
+ * between frames.
+ */
+export function eraseStroke(
+  data: Uint8ClampedArray,
+  imageW: number,
+  imageH: number,
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+  radius: number,
+): void {
+  const dx = x1 - x0;
+  const dy = y1 - y0;
+  const steps = Math.max(1, Math.ceil(Math.hypot(dx, dy)));
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;
+    eraseCircle(data, imageW, imageH, x0 + dx * t, y0 + dy * t, radius);
+  }
+}
+
+/**
+ * Return a new ImageData of `newW × newH`, with `src` centered inside and
+ * transparent padding elsewhere. Used to give Select+Move extra room when a
+ * crowded sheet needs sprites spread out before auto-detecting blobs.
+ */
+export function expandCanvas(src: ImageData, newW: number, newH: number): ImageData {
+  const w = Math.max(src.width, Math.floor(newW));
+  const h = Math.max(src.height, Math.floor(newH));
+  const out = new Uint8ClampedArray(w * h * 4);
+  const dx = Math.floor((w - src.width) / 2);
+  const dy = Math.floor((h - src.height) / 2);
+  const srcData = src.data;
+  const srcW = src.width;
+  const srcH = src.height;
+  for (let y = 0; y < srcH; y++) {
+    const srcStart = y * srcW * 4;
+    const dstStart = ((y + dy) * w + dx) * 4;
+    out.set(srcData.subarray(srcStart, srcStart + srcW * 4), dstStart);
+  }
+  return new ImageData(out, w, h);
+}
+
 export async function loadImageFromBytes(bytes: Uint8Array, mime = 'image/png'): Promise<ImageData> {
   // createImageBitmap decodes off the main thread — much faster than going
   // through an HTMLImageElement, and skips the URL.createObjectURL round-trip.

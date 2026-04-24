@@ -1,7 +1,7 @@
 import { app, BrowserWindow, ipcMain, dialog } from 'electron';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { readFile, writeFile, readdir, stat } from 'node:fs/promises';
+import { readFile, writeFile, readdir, stat, mkdir } from 'node:fs/promises';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -116,6 +116,11 @@ ipcMain.handle('fs:readFile', async (_, filePath: string) => {
 ipcMain.handle('fs:writeFile', async (_, filePath: string, buffer: ArrayBuffer) => {
   await writeFile(filePath, Buffer.from(buffer));
   return filePath;
+});
+
+ipcMain.handle('fs:mkdir', async (_, dirPath: string) => {
+  await mkdir(dirPath, { recursive: true });
+  return dirPath;
 });
 
 app.whenReady().then(() => {

@@ -1,8 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { BoxesConfig, CellOverride, Rect } from '../../lib/slicing';
+import { polygonBounds, polygonToPath, type Point } from '../../lib/lasso';
+
+export type BoxesTool = 'rect' | 'lasso';
 
 type DragState =
   | { kind: 'create'; startX: number; startY: number }
+  | { kind: 'lasso' }
   | { kind: 'move'; index: number; offsetX: number; offsetY: number }
   | { kind: 'resize'; index: number; corner: Corner; originalRect: Rect };
 
@@ -17,6 +21,7 @@ export function BoxesOverlay({
   imageHeight,
   selectedIndex,
   onSelectedIndexChange,
+  tool,
 }: {
   config: BoxesConfig;
   overrides: Record<number, CellOverride>;
@@ -26,10 +31,12 @@ export function BoxesOverlay({
   imageHeight: number;
   selectedIndex: number | null;
   onSelectedIndexChange: (i: number | null) => void;
+  tool: BoxesTool;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState<DragState | null>(null);
   const [preview, setPreview] = useState<Rect | null>(null);
+  const [lassoDraft, setLassoDraft] = useState<Point[] | null>(null);
 
   const toLocal = useCallback((e: React.MouseEvent | MouseEvent) => {
     const rect = containerRef.current!.getBoundingClientRect();
@@ -42,8 +49,13 @@ export function BoxesOverlay({
   const onMouseDown = (e: React.MouseEvent) => {
     if (e.button !== 0) return;
     const p = toLocal(e);
-    setDrag({ kind: 'create', startX: p.x, startY: p.y });
-    setPreview({ x: p.x, y: p.y, width: 0, height: 0 });
+    if (tool === 'lasso') {
+      setDrag({ kind: 'lasso' });
+      setLassoDraft([{ x: p.x, y: p.y }]);
+    } else {
+      setDrag({ kind: 'create', startX: p.x, startY: p.y });
+      setPreview({ x: p.x, y: p.y, width: 0, height: 0 });
+    }
     onSelectedIndexChange(null);
     e.stopPropagation();
   };
@@ -57,6 +69,13 @@ export function BoxesOverlay({
       const width = Math.abs(p.x - drag.startX);
       const height = Math.abs(p.y - drag.startY);
       setPreview({ x, y, width, height });
+    } else if (drag.kind === 'lasso') {
+      setLassoDraft((draft) => {
+        if (!draft) return [{ x: p.x, y: p.y }];
+        const last = draft[draft.length - 1];
+        if (Math.hypot(p.x - last.x, p.y - last.y) < 1.5) return draft;
+        return [...draft, { x: p.x, y: p.y }];
+      });
     } else if (drag.kind === 'move') {
       const next = [...config.rects];
       const orig = next[drag.index];
@@ -95,9 +114,25 @@ export function BoxesOverlay({
       const next = [...config.rects, preview];
       onChange({ rects: next });
       onSelectedIndexChange(next.length - 1);
+    } else if (drag?.kind === 'lasso' && lassoDraft && lassoDraft.length >= 3) {
+      const bbox = polygonBounds(lassoDraft);
+      if (bbox && bbox.width > 2 && bbox.height > 2) {
+        const clamped = {
+          x: Math.max(0, Math.min(imageWidth, bbox.x)),
+          y: Math.max(0, Math.min(imageHeight, bbox.y)),
+          width: Math.min(imageWidth - bbox.x, bbox.width),
+          height: Math.min(imageHeight - bbox.y, bbox.height),
+        };
+        if (clamped.width > 2 && clamped.height > 2) {
+          const next = [...config.rects, clamped];
+          onChange({ rects: next });
+          onSelectedIndexChange(next.length - 1);
+        }
+      }
     }
     setDrag(null);
     setPreview(null);
+    setLassoDraft(null);
   };
 
   useEffect(() => {
@@ -215,6 +250,28 @@ export function BoxesOverlay({
           }}
         />
       )}
+      {lassoDraft && lassoDraft.length >= 2 && (
+        <svg
+          style={{
+            position: 'absolute',
+            left: 0,
+            top: 0,
+            width: imageWidth,
+            height: imageHeight,
+            pointerEvents: 'none',
+            overflow: 'visible',
+          }}
+        >
+          <path
+            d={polygonToPath(lassoDraft)}
+            fill="rgba(106,255,158,0.08)"
+            stroke="#6aff9e"
+            strokeWidth={strokeW}
+            strokeDasharray={`${3 / zoom} ${2 / zoom}`}
+            vectorEffect="non-scaling-stroke"
+          />
+        </svg>
+      )}
       <div
         style={{
           position: 'absolute',
@@ -229,7 +286,9 @@ export function BoxesOverlay({
           borderRadius: 2 / zoom,
         }}
       >
-        drag: create box · click box: select · drag corner: resize · del: remove
+        {tool === 'lasso'
+          ? 'drag: trace lasso → box · click box: select · del: remove'
+          : 'drag: create box · click box: select · drag corner: resize · del: remove'}
       </div>
     </div>
   );

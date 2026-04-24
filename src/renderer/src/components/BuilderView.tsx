@@ -234,7 +234,13 @@ function StripPane({
   onSlotClear: (i: number) => void;
 }) {
   const [zoom, setZoom] = useState(1);
-  const rawStripW = state.boxSize.w * Math.max(1, slots.length) + Math.max(0, slots.length - 1) * 2;
+  // Gap between the reference box and the first slot — close but visually
+  // distinct as "not part of the animation".
+  const REF_GAP = 8;
+  const hasRef = !!state.scaleRef;
+  const slotsTotalW =
+    state.boxSize.w * Math.max(1, slots.length) + Math.max(0, slots.length - 1) * 2;
+  const rawStripW = (hasRef ? state.boxSize.w + REF_GAP : 0) + slotsTotalW;
   const rawStripH = state.boxSize.h;
   const scaledW = rawStripW * zoom;
   const scaledH = rawStripH * zoom;
@@ -316,7 +322,7 @@ function StripPane({
             <div
               style={{
                 display: 'flex',
-                gap: 2,
+                alignItems: 'flex-start',
                 position: 'absolute',
                 left: 0,
                 top: 0,
@@ -324,6 +330,52 @@ function StripPane({
                 transformOrigin: '0 0',
               }}
             >
+              {hasRef && state.scaleRef && (
+                <div
+                  style={{
+                    width: state.boxSize.w,
+                    height: state.boxSize.h,
+                    border: '1px dashed #ffbf6a',
+                    background:
+                      'repeating-conic-gradient(#2a2a30 0% 25%, #1e1e22 0% 50%) 50% / 16px 16px',
+                    position: 'relative',
+                    flexShrink: 0,
+                    marginRight: REF_GAP,
+                  }}
+                  title={`Scale reference · target height ${state.scaleRef.targetHeightPx}px`}
+                >
+                  <SlotRenderer
+                    slot={{
+                      cell: {
+                        sourceId: state.scaleRef.sourceId,
+                        cellIndex: state.scaleRef.cellIndex,
+                      },
+                      yOffset: 0,
+                      scaleOverride: 1,
+                    }}
+                    boxSize={state.boxSize}
+                    anchor={state.anchor}
+                    scaleRef={state.scaleRef}
+                    sources={sources}
+                    getSource={getSource}
+                  />
+                  <div
+                    style={{
+                      position: 'absolute',
+                      top: 2,
+                      left: 4,
+                      color: '#ffbf6a',
+                      fontSize: 10,
+                      fontFamily: 'monospace',
+                      pointerEvents: 'none',
+                      textShadow: '0 1px 0 rgba(0,0,0,0.8)',
+                    }}
+                  >
+                    ref · {state.scaleRef.targetHeightPx}px
+                  </div>
+                </div>
+              )}
+              <div style={{ display: 'flex', gap: 2 }}>
               {slots.map((slot, i) => {
                 const focused = selectedSlotIndex === i;
                 return (
@@ -380,6 +432,7 @@ function StripPane({
                   </div>
                 );
               })}
+              </div>
             </div>
           </div>
         )}

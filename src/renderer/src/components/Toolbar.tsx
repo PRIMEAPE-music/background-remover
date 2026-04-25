@@ -1,4 +1,4 @@
-export type ViewMode = 'remove' | 'select' | 'slice' | 'builder';
+export type ViewMode = 'remove' | 'select' | 'slice' | 'builder' | 'generate';
 
 export interface ToolbarProps {
   filename: string | null;
@@ -30,18 +30,18 @@ export function Toolbar({ filename, hasImage, mode, onModeChange, onOpen, onSave
       <div style={{ width: 1, height: 22, background: 'var(--border)', margin: '0 6px' }} />
 
       <div style={{ display: 'flex', gap: 4 }}>
-        {(['remove', 'select', 'slice', 'builder'] as const).map((m) => (
+        {(['remove', 'select', 'slice', 'builder', 'generate'] as const).map((m) => (
           <button
             key={m}
             className={mode === m ? 'primary' : ''}
             onClick={() => onModeChange(m)}
             style={{ textTransform: 'capitalize' }}
-            // Builder is always reachable so the user can open a saved
-            // project without having to load a sheet first. The three
-            // editing modes still gate on an active source.
-            disabled={m !== 'builder' && !hasImage}
+            // Builder + Generate are always reachable: Builder loads saved
+            // projects without a sheet, and Generate produces images from
+            // scratch. The three editing modes still gate on an active source.
+            disabled={m !== 'builder' && m !== 'generate' && !hasImage}
             title={
-              m !== 'builder' && !hasImage
+              m !== 'builder' && m !== 'generate' && !hasImage
                 ? 'Load a sheet first (drop one or click "Open image…")'
                 : undefined
             }
@@ -52,7 +52,9 @@ export function Toolbar({ filename, hasImage, mode, onModeChange, onOpen, onSave
                 ? 'Select + Move'
                 : m === 'slice'
                   ? 'Slice'
-                  : 'Builder'}
+                  : m === 'builder'
+                    ? 'Builder'
+                    : 'Generate'}
           </button>
         ))}
       </div>

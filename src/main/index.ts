@@ -1,7 +1,16 @@
 import { app, BrowserWindow, ipcMain, dialog } from 'electron';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { readFile, writeFile, readdir, stat, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, readdir, stat, mkdir, rename, unlink } from 'node:fs/promises';
+import {
+  generateImage,
+  saveApiKey,
+  loadApiKey,
+  clearApiKey,
+  GeminiError,
+  type GeminiAspect,
+  type GeminiSize,
+} from './gemini.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -121,6 +130,88 @@ ipcMain.handle('fs:writeFile', async (_, filePath: string, buffer: ArrayBuffer) 
 ipcMain.handle('fs:mkdir', async (_, dirPath: string) => {
   await mkdir(dirPath, { recursive: true });
   return dirPath;
+});
+
+ipcMain.handle('fs:rename', async (_, from: string, to: string) => {
+  await rename(from, to);
+  return to;
+});
+
+ipcMain.handle('fs:unlink', async (_, filePath: string) => {
+  await unlink(filePath);
+  return filePath;
+});
+
+ipcMain.handle('gemini:saveKey', async (_, key: string) => {
+  await saveApiKey(key);
+  return true;
+});
+
+ipcMain.handle('gemini:loadKey', async () => {
+  return await loadApiKey();
+});
+
+ipcMain.handle('gemini:clearKey', async () => {
+  await clearApiKey();
+  return true;
+});
+
+// One AbortController per active generate job, keyed by jobId so the renderer
+// can cancel a specific batch row mid-flight.
+const generateJobs = new Map<string, AbortController>();
+
+ipcMain.handle(
+  'gemini:generate',
+  async (
+    _,
+    args: {
+      jobId: string;
+      apiKey: string;
+      prompt: string;
+      aspectRatio: GeminiAspect;
+      size: GeminiSize;
+      referenceImage?: { mime: string; data: ArrayBuffer };
+    },
+  ) => {
+    const ctrl = new AbortController();
+    generateJobs.set(args.jobId, ctrl);
+    try {
+      const result = await generateImage({
+        apiKey: args.apiKey,
+        prompt: args.prompt,
+        aspectRatio: args.aspectRatio,
+        size: args.size,
+        referenceImage: args.referenceImage
+          ? { mime: args.referenceImage.mime, data: new Uint8Array(args.referenceImage.data) }
+          : undefined,
+        signal: ctrl.signal,
+      });
+      return {
+        ok: true as const,
+        imageBytes: result.imageBytes.buffer.slice(
+          result.imageBytes.byteOffset,
+          result.imageBytes.byteOffset + result.imageBytes.byteLength,
+        ),
+        mime: result.mime,
+      };
+    } catch (e) {
+      if ((e as Error).name === 'AbortError') {
+        return { ok: false as const, kind: 'cancelled' as const, message: 'Cancelled' };
+      }
+      if (e instanceof GeminiError) {
+        return { ok: false as const, kind: e.kind, message: e.message, status: e.status };
+      }
+      return { ok: false as const, kind: 'other' as const, message: (e as Error).message };
+    } finally {
+      generateJobs.delete(args.jobId);
+    }
+  },
+);
+
+ipcMain.handle('gemini:cancel', async (_, jobId: string) => {
+  const ctrl = generateJobs.get(jobId);
+  if (ctrl) ctrl.abort();
+  return true;
 });
 
 app.whenReady().then(() => {

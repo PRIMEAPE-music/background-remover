@@ -24,6 +24,10 @@ export interface BuilderViewProps {
   onSelectCell: (c: SelectedCell | null) => void;
   selectedSlotIndex: number | null;
   onSelectSlot: (i: number | null) => void;
+  /** Snapshot the active animation's slots before a destructive change so the
+   *  user can undo. Caller is responsible for guaranteeing animationId is the
+   *  active one at call time. */
+  onRecordPlacement: (animationId: string, prevSlots: Slot[]) => void;
 }
 
 export function BuilderView({
@@ -35,6 +39,7 @@ export function BuilderView({
   onSelectCell,
   selectedSlotIndex,
   onSelectSlot,
+  onRecordPlacement,
 }: BuilderViewProps) {
   const active = getActiveAnimation(state);
   const slots: Slot[] = active?.slots ?? [];
@@ -45,6 +50,7 @@ export function BuilderView({
       onSelectSlot(slotIndex);
       return;
     }
+    onRecordPlacement(active.id, slots);
     const next = slots.map((s, i) =>
       i === slotIndex ? { ...s, cell: { ...selectedCell } } : s,
     );
@@ -54,6 +60,7 @@ export function BuilderView({
 
   const clearSlot = (slotIndex: number) => {
     if (!active) return;
+    onRecordPlacement(active.id, slots);
     const next = slots.map((s, i) =>
       i === slotIndex ? { cell: null, yOffset: 0, scaleOverride: 1 } : s,
     );
@@ -63,6 +70,8 @@ export function BuilderView({
   return (
     <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
       <GalleryPane
+        state={state}
+        onStateChange={onStateChange}
         sources={sources}
         getSource={getSource}
         selected={selectedCell}
@@ -83,16 +92,49 @@ export function BuilderView({
 }
 
 function GalleryPane({
+  state,
+  onStateChange,
   sources,
   getSource,
   selected,
   onSelect,
 }: {
+  state: BuilderState;
+  onStateChange: (s: BuilderState) => void;
   sources: SourceMeta[];
   getSource: (id: string | null) => ImageData | null;
   selected: SelectedCell | null;
   onSelect: (c: SelectedCell | null) => void;
 }) {
+  // Order to display sources in. Don't mutate the input array; the upstream
+  // sources order is meaningful (load order shown in left edge sidebar).
+  const displaySources = state.gallerySortByName
+    ? [...sources].sort((a, b) =>
+        a.filename.toLowerCase().localeCompare(b.filename.toLowerCase()),
+      )
+    : sources;
+
+  const collapsedSet = new Set(state.collapsedSources);
+  const isCollapsed = (id: string) => collapsedSet.has(id);
+  const toggleCollapsed = (id: string) => {
+    const next = new Set(collapsedSet);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    onStateChange({ ...state, collapsedSources: [...next] });
+  };
+  // "Minimize all" if any are open; "Expand all" if all are already collapsed.
+  const allCollapsed =
+    sources.length > 0 && sources.every((s) => collapsedSet.has(s.id));
+  const toggleAll = () => {
+    onStateChange({
+      ...state,
+      collapsedSources: allCollapsed ? [] : sources.map((s) => s.id),
+    });
+  };
+  const toggleSort = () => {
+    onStateChange({ ...state, gallerySortByName: !state.gallerySortByName });
+  };
+
   return (
     <div
       style={{
@@ -106,8 +148,27 @@ function GalleryPane({
         gap: 12,
       }}
     >
-      <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-dim)' }}>
-        Sprite pool
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-dim)', flex: 1 }}>
+          Sprite pool
+        </div>
+        <button
+          onClick={toggleSort}
+          className={state.gallerySortByName ? 'primary' : ''}
+          disabled={sources.length === 0}
+          style={{ fontSize: 11, padding: '2px 8px' }}
+          title={state.gallerySortByName ? 'Sorted A→Z (click to revert)' : 'Sort sources alphabetically'}
+        >
+          A→Z
+        </button>
+        <button
+          onClick={toggleAll}
+          disabled={sources.length === 0}
+          style={{ fontSize: 11, padding: '2px 8px' }}
+          title={allCollapsed ? 'Expand all sources' : 'Minimize all sources'}
+        >
+          {allCollapsed ? 'Expand all' : 'Minimize all'}
+        </button>
       </div>
       {sources.length === 0 && (
         <div style={{ fontSize: 11, color: 'var(--text-dim)', lineHeight: 1.4 }}>
@@ -119,13 +180,15 @@ function GalleryPane({
         place it there. Click a placed slot to focus it (arrows nudge
         Y-offset). Right-click a placed slot to clear it.
       </div>
-      {sources.map((s) => (
+      {displaySources.map((s) => (
         <SourceRow
           key={s.id}
           source={s}
           getSource={getSource}
           selected={selected}
           onSelect={onSelect}
+          collapsed={isCollapsed(s.id)}
+          onToggleCollapsed={() => toggleCollapsed(s.id)}
         />
       ))}
     </div>
@@ -137,13 +200,17 @@ function SourceRow({
   getSource,
   selected,
   onSelect,
+  collapsed,
+  onToggleCollapsed,
 }: {
   source: SourceMeta;
   getSource: (id: string | null) => ImageData | null;
   selected: SelectedCell | null;
   onSelect: (c: SelectedCell | null) => void;
+  collapsed: boolean;
+  onToggleCollapsed: () => void;
 }) {
-  const [open, setOpen] = useState(true);
+  const open = !collapsed;
   const cells: Rect[] = useMemo(
     () => computeCells(source.slice, source.width, source.height),
     [source.slice, source.width, source.height],
@@ -151,7 +218,7 @@ function SourceRow({
   return (
     <section style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
       <div
-        onClick={() => setOpen((o) => !o)}
+        onClick={onToggleCollapsed}
         style={{
           display: 'flex',
           alignItems: 'center',

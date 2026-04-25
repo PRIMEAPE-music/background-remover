@@ -32,14 +32,22 @@ export interface ScaleRef {
 
 /**
  * One named animation on a character — e.g. "idle", "walk", "attack".
- * Has its own ordered slot list. All animations share the character's
- * frame box, anchor, and scale lock.
+ * Has its own ordered slot list and playback speed. All animations share
+ * the character's frame box, anchor, and scale lock.
  */
 export interface Animation {
   id: string;
   name: string;
   slots: Slot[];
+  /**
+   * Playback speed — used by the in-app preview AND appended to the
+   * exported PNG filename so the engine integrator knows what tick rate
+   * to play it at.
+   */
+  fps: number;
 }
+
+export const DEFAULT_FPS = 8;
 
 export interface BuilderState {
   /** Fixed frame size for this character — typically 2× the largest sprite height. */
@@ -52,6 +60,14 @@ export interface BuilderState {
   animations: Animation[];
   /** The animation currently being edited in the strip. */
   activeAnimationId: string | null;
+  /**
+   * IDs of source rows currently minimized in the gallery. Persists per
+   * project so the user can keep unrelated sheets collapsed when working on
+   * one specific animation.
+   */
+  collapsedSources: string[];
+  /** When true, the gallery sorts source rows alphabetically by filename. */
+  gallerySortByName: boolean;
 }
 
 export const DEFAULT_BUILDER: BuilderState = {
@@ -60,6 +76,8 @@ export const DEFAULT_BUILDER: BuilderState = {
   scaleRef: null,
   animations: [],
   activeAnimationId: null,
+  collapsedSources: [],
+  gallerySortByName: false,
 };
 
 export function newAnimationId(): string {
@@ -70,7 +88,7 @@ export function newAnimationId(): string {
 }
 
 export function newAnimation(name: string, slotCount = 8): Animation {
-  return { id: newAnimationId(), name, slots: emptySlots(slotCount) };
+  return { id: newAnimationId(), name, slots: emptySlots(slotCount), fps: DEFAULT_FPS };
 }
 
 export function emptySlots(count: number): Slot[] {
@@ -96,7 +114,7 @@ export function getActiveAnimation(state: BuilderState): Animation | null {
 /** Replace fields on the active animation and return a new state. Noop if none active. */
 export function updateActiveAnimation(
   state: BuilderState,
-  patch: Partial<Pick<Animation, 'name' | 'slots'>>,
+  patch: Partial<Pick<Animation, 'name' | 'slots' | 'fps'>>,
 ): BuilderState {
   if (!state.activeAnimationId) return state;
   return {
@@ -117,30 +135,41 @@ export function migrateBuilderState(raw: unknown): BuilderState {
   if (!raw || typeof raw !== 'object') return DEFAULT_BUILDER;
   const obj = raw as Record<string, unknown>;
   if (Array.isArray(obj.animations)) {
-    // Already new shape — just fill defaults.
+    // Already new-ish shape — backfill fps for animations saved before that field existed.
+    const animations = (obj.animations as Animation[]).map((a) => ({
+      ...a,
+      fps: typeof a.fps === 'number' && a.fps > 0 ? a.fps : DEFAULT_FPS,
+    }));
     return {
       boxSize: (obj.boxSize as BuilderState['boxSize']) ?? DEFAULT_BUILDER.boxSize,
       anchor: (obj.anchor as BuilderState['anchor']) ?? DEFAULT_BUILDER.anchor,
       scaleRef: (obj.scaleRef as BuilderState['scaleRef']) ?? null,
-      animations: obj.animations as Animation[],
+      animations,
       activeAnimationId:
         (obj.activeAnimationId as string | null) ??
-        (Array.isArray(obj.animations) && obj.animations.length > 0
-          ? (obj.animations[0] as Animation).id
-          : null),
+        (animations.length > 0 ? animations[0].id : null),
+      collapsedSources: Array.isArray(obj.collapsedSources)
+        ? (obj.collapsedSources as string[]).filter((x) => typeof x === 'string')
+        : [],
+      gallerySortByName:
+        typeof obj.gallerySortByName === 'boolean' ? obj.gallerySortByName : false,
     };
   }
   // Old shape: top-level slots + animationName
   const oldSlots = Array.isArray(obj.slots) ? (obj.slots as Slot[]) : [];
   const oldName = typeof obj.animationName === 'string' ? obj.animationName : 'animation';
   const animations: Animation[] =
-    oldSlots.length > 0 ? [{ id: newAnimationId(), name: oldName, slots: oldSlots }] : [];
+    oldSlots.length > 0
+      ? [{ id: newAnimationId(), name: oldName, slots: oldSlots, fps: DEFAULT_FPS }]
+      : [];
   return {
     boxSize: (obj.boxSize as BuilderState['boxSize']) ?? DEFAULT_BUILDER.boxSize,
     anchor: (obj.anchor as BuilderState['anchor']) ?? DEFAULT_BUILDER.anchor,
     scaleRef: (obj.scaleRef as BuilderState['scaleRef']) ?? null,
     animations,
     activeAnimationId: animations[0]?.id ?? null,
+    collapsedSources: [],
+    gallerySortByName: false,
   };
 }
 

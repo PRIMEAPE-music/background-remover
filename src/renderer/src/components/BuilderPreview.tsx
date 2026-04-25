@@ -1,10 +1,16 @@
 import { memo, useEffect, useState } from 'react';
-import { getActiveAnimation, type BuilderState } from '../lib/builder';
+import {
+  DEFAULT_FPS,
+  getActiveAnimation,
+  updateActiveAnimation,
+  type BuilderState,
+} from '../lib/builder';
 import type { SourceMeta } from '../lib/sources';
 import { SlotRenderer } from './SlotRenderer';
 
 export interface BuilderPreviewProps {
   state: BuilderState;
+  onStateChange: (s: BuilderState) => void;
   sources: SourceMeta[];
   getSource: (id: string | null) => ImageData | null;
 }
@@ -18,6 +24,7 @@ export interface BuilderPreviewProps {
  */
 export const BuilderPreview = memo(function BuilderPreview({
   state,
+  onStateChange,
   sources,
   getSource,
 }: BuilderPreviewProps) {
@@ -29,7 +36,12 @@ export const BuilderPreview = memo(function BuilderPreview({
       <label>Animation preview</label>
       {enabled ? (
         <>
-          <PreviewInner state={state} sources={sources} getSource={getSource} />
+          <PreviewInner
+            state={state}
+            onStateChange={onStateChange}
+            sources={sources}
+            getSource={getSource}
+          />
           <button
             onClick={() => setEnabled(false)}
             style={{ marginTop: 6, width: '100%', fontSize: 11 }}
@@ -53,18 +65,25 @@ export const BuilderPreview = memo(function BuilderPreview({
 
 function PreviewInner({
   state,
+  onStateChange,
   sources,
   getSource,
 }: {
   state: BuilderState;
+  onStateChange: (s: BuilderState) => void;
   sources: SourceMeta[];
   getSource: (id: string | null) => ImageData | null;
 }) {
-  const [fps, setFps] = useState(8);
   const [playing, setPlaying] = useState(true);
   const [index, setIndex] = useState(0);
   const active = getActiveAnimation(state);
   const slots = active?.slots ?? [];
+  // FPS is per-animation now — slider edits push to BuilderState so the
+  // chosen rate persists across saves and is appended to the export filename.
+  const fps = active?.fps ?? DEFAULT_FPS;
+  const setFps = (next: number) => {
+    onStateChange(updateActiveAnimation(state, { fps: Math.max(1, Math.min(60, next)) }));
+  };
 
   useEffect(() => {
     setIndex((i) => Math.min(i, Math.max(0, slots.length - 1)));

@@ -2,6 +2,40 @@ export function cloneImageData(src: ImageData): ImageData {
   return new ImageData(new Uint8ClampedArray(src.data), src.width, src.height);
 }
 
+/** Mirror image left-to-right. Returns a new ImageData. */
+export function flipImageDataHorizontal(img: ImageData): ImageData {
+  const w = img.width;
+  const h = img.height;
+  const out = new Uint8ClampedArray(w * h * 4);
+  const src = img.data;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const si = (y * w + x) * 4;
+      const di = (y * w + (w - 1 - x)) * 4;
+      out[di] = src[si];
+      out[di + 1] = src[si + 1];
+      out[di + 2] = src[si + 2];
+      out[di + 3] = src[si + 3];
+    }
+  }
+  return new ImageData(out, w, h);
+}
+
+/** Mirror image top-to-bottom. Returns a new ImageData. */
+export function flipImageDataVertical(img: ImageData): ImageData {
+  const w = img.width;
+  const h = img.height;
+  const out = new Uint8ClampedArray(w * h * 4);
+  const src = img.data;
+  const rowBytes = w * 4;
+  for (let y = 0; y < h; y++) {
+    const sStart = y * rowBytes;
+    const dStart = (h - 1 - y) * rowBytes;
+    out.set(src.subarray(sStart, sStart + rowBytes), dStart);
+  }
+  return new ImageData(out, w, h);
+}
+
 /**
  * Zero the alpha of every pixel inside a filled circle (cx, cy, radius).
  * Mutates `data` in place — caller is responsible for history + version bump.

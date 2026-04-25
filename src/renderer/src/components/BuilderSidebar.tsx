@@ -23,6 +23,14 @@ export interface BuilderSidebarProps {
   onDeselectSlot: () => void;
   onDeselectCell: () => void;
   onExport: () => void;
+  onExportAllToProject: () => void;
+  /** Where the active project lives on disk, or null if it hasn't been saved yet. */
+  hasProjectFolder: boolean;
+  onRecordPlacement: (animationId: string, prevSlots: import('../lib/builder').Slot[]) => void;
+  onUndoPlacement: () => void;
+  onRedoPlacement: () => void;
+  canUndoPlacement: boolean;
+  canRedoPlacement: boolean;
   projectName: string;
   projectFolder: string | null;
   recentFolders: Array<{ path: string; name: string; at: string }>;
@@ -48,6 +56,13 @@ export function BuilderSidebar({
   onDeselectSlot,
   onDeselectCell,
   onExport,
+  onExportAllToProject,
+  hasProjectFolder,
+  onRecordPlacement,
+  onUndoPlacement,
+  onRedoPlacement,
+  canUndoPlacement,
+  canRedoPlacement,
   projectName,
   projectFolder,
   recentFolders,
@@ -64,6 +79,8 @@ export function BuilderSidebar({
   const setSlotCount = (n: number) => {
     if (!active) return;
     const count = Math.max(0, Math.min(64, Math.floor(n)));
+    if (count === activeSlots.length) return;
+    onRecordPlacement(active.id, activeSlots);
     const next: typeof activeSlots = [];
     for (let i = 0; i < count; i++)
       next.push(activeSlots[i] ?? { cell: null, yOffset: 0, scaleOverride: 1 });
@@ -113,22 +130,23 @@ export function BuilderSidebar({
 
   const allFilled = !!active && activeSlots.length > 0 && activeSlots.every((s) => s.cell);
 
-  // Animation bank helpers
+  // Animation bank helpers — Electron blocks `prompt()` so renaming uses an
+  // inline input below the dropdown, and adding picks an auto-name the user
+  // can rename right after.
   const addAnimation = () => {
-    const n = prompt('Name for the new animation:', 'animation');
-    if (!n) return;
-    const a = newAnimation(n.trim(), 8);
+    let i = state.animations.length + 1;
+    let candidate = `animation_${i}`;
+    const taken = new Set(state.animations.map((a) => a.name));
+    while (taken.has(candidate)) {
+      i++;
+      candidate = `animation_${i}`;
+    }
+    const a = newAnimation(candidate, 8);
     onStateChange({
       ...state,
       animations: [...state.animations, a],
       activeAnimationId: a.id,
     });
-  };
-  const renameActiveAnimation = () => {
-    if (!active) return;
-    const n = prompt('Rename animation:', active.name);
-    if (!n) return;
-    onStateChange(updateActiveAnimation(state, { name: n.trim() }));
   };
   const deleteActiveAnimation = () => {
     if (!active) return;
@@ -142,6 +160,22 @@ export function BuilderSidebar({
   };
   const setActiveAnimation = (id: string) => {
     onStateChange({ ...state, activeAnimationId: id });
+  };
+
+  // Inline rename — local draft synced with active.name when the active
+  // animation switches, committed on Enter or blur.
+  const [nameDraft, setNameDraft] = useState(active?.name ?? '');
+  useEffect(() => {
+    setNameDraft(active?.name ?? '');
+  }, [active?.id, active?.name]);
+  const commitRename = () => {
+    if (!active) return;
+    const trimmed = nameDraft.trim();
+    if (!trimmed || trimmed === active.name) {
+      setNameDraft(active.name);
+      return;
+    }
+    onStateChange(updateActiveAnimation(state, { name: trimmed }));
   };
 
   return (
@@ -188,16 +222,32 @@ export function BuilderSidebar({
             ))}
           </select>
         )}
+        {active && (
+          <div style={{ marginTop: 6 }}>
+            <input
+              type="text"
+              value={nameDraft}
+              onChange={(e) => setNameDraft(e.target.value)}
+              onBlur={commitRename}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  (e.target as HTMLInputElement).blur();
+                } else if (e.key === 'Escape') {
+                  e.preventDefault();
+                  setNameDraft(active.name);
+                  (e.target as HTMLInputElement).blur();
+                }
+              }}
+              placeholder="animation name"
+              style={{ width: '100%' }}
+              title="Rename — press Enter or click away to commit"
+            />
+          </div>
+        )}
         <div style={{ display: 'flex', gap: 4, marginTop: 6 }}>
           <button onClick={addAnimation} style={{ flex: 1, fontSize: 11 }}>
             + New
-          </button>
-          <button
-            onClick={renameActiveAnimation}
-            disabled={!active}
-            style={{ flex: 1, fontSize: 11 }}
-          >
-            Rename
           </button>
           <button
             onClick={deleteActiveAnimation}
@@ -209,6 +259,24 @@ export function BuilderSidebar({
         </div>
         <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 4 }}>
           Animations share the character's frame box + scale lock. Each has its own slot list.
+        </div>
+        <div style={{ display: 'flex', gap: 4, marginTop: 8 }}>
+          <button
+            onClick={onUndoPlacement}
+            disabled={!canUndoPlacement}
+            style={{ flex: 1, fontSize: 11 }}
+            title="Undo placement / clear / slot-count change (Ctrl+Z)"
+          >
+            ↶ Undo
+          </button>
+          <button
+            onClick={onRedoPlacement}
+            disabled={!canRedoPlacement}
+            style={{ flex: 1, fontSize: 11 }}
+            title="Redo (Ctrl+Y or Ctrl+Shift+Z)"
+          >
+            ↷ Redo
+          </button>
         </div>
       </section>
 
@@ -470,7 +538,12 @@ export function BuilderSidebar({
         </button>
       </section>
 
-      <BuilderPreview state={state} sources={sources} getSource={getSource} />
+      <BuilderPreview
+        state={state}
+        onStateChange={onStateChange}
+        sources={sources}
+        getSource={getSource}
+      />
 
       <section>
         <label>Export</label>
@@ -487,11 +560,38 @@ export function BuilderSidebar({
                 : undefined
           }
         >
-          Export animation strip…
+          Export this animation…
         </button>
         <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 4 }}>
-          Writes <code>{(active?.name ?? 'animation')}.png</code> at{' '}
-          {state.boxSize.w * Math.max(1, activeSlots.length)}×{state.boxSize.h}.
+          Writes{' '}
+          <code>
+            {active?.name ?? 'animation'}_{active?.fps ?? 8}fps.png
+          </code>{' '}
+          via Save dialog at {state.boxSize.w * Math.max(1, activeSlots.length)}×
+          {state.boxSize.h}. Set FPS in the preview section below.
+        </div>
+        <button
+          onClick={onExportAllToProject}
+          disabled={
+            !hasProjectFolder || !state.scaleRef || state.animations.length === 0
+          }
+          style={{ width: '100%', marginTop: 6 }}
+          title={
+            !hasProjectFolder
+              ? 'Save the project to a folder first (Save button at the top of the sidebar)'
+              : !state.scaleRef
+                ? 'Set a scale reference first'
+                : state.animations.length === 0
+                  ? 'No animations to export'
+                  : 'Save every animation strip into the project folder for re-editing later'
+          }
+        >
+          Export all animations to project folder
+        </button>
+        <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 4 }}>
+          {hasProjectFolder
+            ? 'Writes one PNG per animation alongside project.spriteproj.json. Skips animations missing slots or a scale lock.'
+            : 'Save the project to a folder first — this button writes into that folder.'}
         </div>
       </section>
 
@@ -500,6 +600,7 @@ export function BuilderSidebar({
         <button
           onClick={() => {
             if (!active) return;
+            onRecordPlacement(active.id, activeSlots);
             onStateChange(updateActiveAnimation(state, { slots: emptySlots(activeSlots.length) }));
           }}
           disabled={!active || activeSlots.every((s) => !s.cell)}

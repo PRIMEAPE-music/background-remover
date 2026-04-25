@@ -36,7 +36,15 @@ export function Toolbar({ filename, hasImage, mode, onModeChange, onOpen, onSave
             className={mode === m ? 'primary' : ''}
             onClick={() => onModeChange(m)}
             style={{ textTransform: 'capitalize' }}
-            disabled={!hasImage}
+            // Builder is always reachable so the user can open a saved
+            // project without having to load a sheet first. The three
+            // editing modes still gate on an active source.
+            disabled={m !== 'builder' && !hasImage}
+            title={
+              m !== 'builder' && !hasImage
+                ? 'Load a sheet first (drop one or click "Open image…")'
+                : undefined
+            }
           >
             {m === 'remove'
               ? 'Remove BG'

@@ -11,15 +11,14 @@ import { SourcesSidebar } from './components/SourcesSidebar';
 import { BuilderView, type SelectedCell } from './components/BuilderView';
 import { BuilderSidebar } from './components/BuilderSidebar';
 import {
-  computeAnchorPos,
-  contentBoundsInRect,
   DEFAULT_BUILDER,
   getActiveAnimation,
   newAnimation,
-  slotScale,
   updateActiveAnimation,
   type BuilderState,
+  type Slot,
 } from './lib/builder';
+import { composeAnimationStrip, safeAnimationFilename } from './lib/builderExport';
 import {
   addRecentFolder,
   listRecentFolders,
@@ -42,6 +41,8 @@ import {
   eraseStroke,
   expandCanvas,
   extractRect,
+  flipImageDataHorizontal,
+  flipImageDataVertical,
   imageDataToPngBytes,
   loadImageFromBytes,
 } from './lib/image-utils';
@@ -115,6 +116,61 @@ export function App() {
   const [builder, setBuilder] = useState<BuilderState>(DEFAULT_BUILDER);
   const [builderSelectedCell, setBuilderSelectedCell] = useState<SelectedCell | null>(null);
   const [builderSelectedSlot, setBuilderSelectedSlot] = useState<number | null>(null);
+  // Per-animation placement history (past/future slot snapshots). Recorded
+  // before any placement, clear, or slot-count change so the user can undo.
+  const [placementHistory, setPlacementHistory] = useState<
+    Record<string, { past: Slot[][]; future: Slot[][] }>
+  >({});
+  const recordPlacement = useCallback((animationId: string, prevSlots: Slot[]) => {
+    setPlacementHistory((h) => {
+      const cur = h[animationId] ?? { past: [], future: [] };
+      return {
+        ...h,
+        [animationId]: {
+          past: [...cur.past, prevSlots].slice(-50),
+          future: [],
+        },
+      };
+    });
+  }, []);
+  const undoPlacement = useCallback(() => {
+    const aid = builder.activeAnimationId;
+    if (!aid) return;
+    const entry = placementHistory[aid];
+    if (!entry || entry.past.length === 0) return;
+    const last = entry.past[entry.past.length - 1];
+    const currentSlots = getActiveAnimation(builder)?.slots ?? [];
+    setPlacementHistory((h) => ({
+      ...h,
+      [aid]: {
+        past: entry.past.slice(0, -1),
+        future: [...entry.future, currentSlots].slice(-50),
+      },
+    }));
+    setBuilder((b) => updateActiveAnimation(b, { slots: last }));
+  }, [builder, placementHistory]);
+  const redoPlacement = useCallback(() => {
+    const aid = builder.activeAnimationId;
+    if (!aid) return;
+    const entry = placementHistory[aid];
+    if (!entry || entry.future.length === 0) return;
+    const next = entry.future[entry.future.length - 1];
+    const currentSlots = getActiveAnimation(builder)?.slots ?? [];
+    setPlacementHistory((h) => ({
+      ...h,
+      [aid]: {
+        past: [...entry.past, currentSlots].slice(-50),
+        future: entry.future.slice(0, -1),
+      },
+    }));
+    setBuilder((b) => updateActiveAnimation(b, { slots: next }));
+  }, [builder, placementHistory]);
+  const canUndoPlacement =
+    !!builder.activeAnimationId &&
+    (placementHistory[builder.activeAnimationId]?.past.length ?? 0) > 0;
+  const canRedoPlacement =
+    !!builder.activeAnimationId &&
+    (placementHistory[builder.activeAnimationId]?.future.length ?? 0) > 0;
   const [projectName, setProjectName] = useState<string>('');
   const [projectFolder, setProjectFolder] = useState<string | null>(null);
   const [recentFolders, setRecentFoldersState] = useState<
@@ -749,6 +805,130 @@ export function App() {
     });
   }, [activeId, setSourceFloater, setLifting, updateMeta]);
 
+  /**
+   * Lift the current confirmed selection if it isn't already a floater.
+   * Returns the live floater (or null if nothing to lift). Shared between
+   * flip and the move-on-arrow path so both get the same lift semantics.
+   */
+  const ensureFloaterLifted = useCallback((): ImageData | null => {
+    if (!activeId || !active) return null;
+    const rt = getRuntime(activeId);
+    if (rt?.floater) return rt.floater;
+    if (!active.selectionRect || !active.selectionConfirmed) return null;
+    const img = getSourceImage(activeId);
+    if (!img) return null;
+    const rect = active.selectionRect;
+    pushHistory(activeId, img);
+    setLiftSnapshot(activeId, img);
+    setLifting(activeId, true);
+    const f = extractRect(img, rect.x, rect.y, rect.width, rect.height);
+    if (active.lassoPolygon) {
+      applyPolygonMask(f, active.lassoPolygon, rect.x, rect.y);
+    }
+    setSourceFloater(activeId, f);
+    const cleared = cloneImageData(img);
+    if (active.lassoPolygon) {
+      clearImageByFloater(cleared, f, rect.x, rect.y);
+    } else {
+      clearImageRect(cleared, rect.x, rect.y, rect.width, rect.height);
+    }
+    setSourceImage(activeId, cleared);
+    return f;
+  }, [
+    activeId,
+    active,
+    getRuntime,
+    getSourceImage,
+    pushHistory,
+    setLiftSnapshot,
+    setLifting,
+    setSourceFloater,
+    setSourceImage,
+  ]);
+
+  const flipFloater = useCallback(
+    (dir: 'h' | 'v') => {
+      if (!activeId) return;
+      const floater = ensureFloaterLifted();
+      if (!floater) return;
+      const flipped =
+        dir === 'h' ? flipImageDataHorizontal(floater) : flipImageDataVertical(floater);
+      setSourceFloater(activeId, flipped);
+    },
+    [activeId, ensureFloaterLifted, setSourceFloater],
+  );
+
+  // App-scoped clipboard for Select+Move copy/paste. Holds the most recent
+  // copied selection's pixels + the rect it came from so paste lands at the
+  // same position by default.
+  const [selectionClipboard, setSelectionClipboard] = useState<{
+    image: ImageData;
+    offset: { x: number; y: number };
+  } | null>(null);
+
+  const copySelection = useCallback(() => {
+    if (!activeId || !active) return;
+    const rt = getRuntime(activeId);
+    let copy: ImageData | null = null;
+    let offset = { x: 0, y: 0 };
+    if (rt?.floater && active.selectionOffset) {
+      // Already lifted — copy the floater + its current display position.
+      copy = cloneImageData(rt.floater);
+      offset = { ...active.selectionOffset };
+    } else if (active.selectionRect && active.selectionConfirmed) {
+      // Confirmed but not lifted — extract straight from source, no mutation.
+      const img = getSourceImage(activeId);
+      if (!img) return;
+      const rect = active.selectionRect;
+      const extracted = extractRect(img, rect.x, rect.y, rect.width, rect.height);
+      if (active.lassoPolygon) {
+        applyPolygonMask(extracted, active.lassoPolygon, rect.x, rect.y);
+      }
+      copy = extracted;
+      offset = { x: rect.x, y: rect.y };
+    }
+    if (!copy) return;
+    setSelectionClipboard({ image: copy, offset });
+  }, [activeId, active, getRuntime, getSourceImage]);
+
+  const pasteSelection = useCallback(() => {
+    if (!activeId || !active || !selectionClipboard) return;
+    // Commit any in-flight floater first so the prior move isn't lost.
+    const rt = getRuntime(activeId);
+    if (rt?.floater) commitFloater(activeId);
+    const img = getSourceImage(activeId);
+    if (!img) return;
+    pushHistory(activeId, img);
+    setLiftSnapshot(activeId, img);
+    setLifting(activeId, true);
+    const f = cloneImageData(selectionClipboard.image);
+    setSourceFloater(activeId, f);
+    const rect = {
+      x: Math.max(0, Math.min(img.width - f.width, selectionClipboard.offset.x)),
+      y: Math.max(0, Math.min(img.height - f.height, selectionClipboard.offset.y)),
+      width: f.width,
+      height: f.height,
+    };
+    updateMeta(activeId, {
+      selectionRect: rect,
+      lassoPolygon: null,
+      selectionOffset: { x: rect.x, y: rect.y },
+      selectionConfirmed: true,
+    });
+  }, [
+    activeId,
+    active,
+    selectionClipboard,
+    getRuntime,
+    commitFloater,
+    getSourceImage,
+    pushHistory,
+    setLiftSnapshot,
+    setLifting,
+    setSourceFloater,
+    updateMeta,
+  ]);
+
   // Auto-commit when leaving select mode OR switching away from a source with a floater.
   const prevModeActiveRef = useRef<{ mode: ViewMode; activeId: string | null }>({ mode, activeId });
   useEffect(() => {
@@ -763,6 +943,35 @@ export function App() {
     }
     prevModeActiveRef.current = { mode, activeId };
   }, [mode, activeId, commitFloater, getRuntime]);
+
+  // Keyboard: H / V flip the floater in select mode; Ctrl+C / Ctrl+V copy/paste.
+  useEffect(() => {
+    if (mode !== 'select') return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      const key = e.key.toLowerCase();
+      if ((e.ctrlKey || e.metaKey) && key === 'c') {
+        e.preventDefault();
+        copySelection();
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && key === 'v') {
+        e.preventDefault();
+        pasteSelection();
+        return;
+      }
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (key === 'h') {
+        e.preventDefault();
+        flipFloater('h');
+      } else if (key === 'v') {
+        e.preventDefault();
+        flipFloater('v');
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [mode, flipFloater, copySelection, pasteSelection]);
 
   // Keyboard: H / V flip for selected cell in slice mode.
   useEffect(() => {
@@ -803,6 +1012,25 @@ export function App() {
     });
   }, [mode, builder.animations.length]);
 
+  // Keyboard: Ctrl+Z / Ctrl+Y (or Ctrl+Shift+Z) for placement undo/redo in Builder mode.
+  useEffect(() => {
+    if (mode !== 'builder') return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (!(e.ctrlKey || e.metaKey)) return;
+      const key = e.key.toLowerCase();
+      if (key === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        undoPlacement();
+      } else if ((key === 'z' && e.shiftKey) || key === 'y') {
+        e.preventDefault();
+        redoPlacement();
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [mode, undoPlacement, redoPlacement]);
+
   // Keyboard: Arrow up/down nudges the focused builder slot's Y-offset on the
   // active animation.
   useEffect(() => {
@@ -826,71 +1054,46 @@ export function App() {
     return () => window.removeEventListener('keydown', handler);
   }, [mode, builderSelectedSlot]);
 
-  // Export the current builder strip — compose each slot's sprite at its
-  // scale/anchor/offset into a single PNG sized (boxW × slotCount) × boxH.
+  // Export the active animation as a strip via Save dialog.
   const exportBuilderStrip = useCallback(async () => {
-    const { boxSize, anchor, scaleRef } = builder;
     const active = getActiveAnimation(builder);
     if (!active) return;
-    const slots = active.slots;
-    const animationName = active.name;
-    if (!scaleRef || slots.length === 0 || !slots.every((s) => s.cell)) return;
-    const width = boxSize.w * slots.length;
-    const height = boxSize.h;
-    const canvas = document.createElement('canvas');
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    ctx.imageSmoothingEnabled = false;
-    ctx.clearRect(0, 0, width, height);
-    for (let i = 0; i < slots.length; i++) {
-      const slot = slots[i];
-      if (!slot.cell) continue;
-      const source = sourcesList.find((s) => s.id === slot.cell!.sourceId);
-      if (!source) continue;
-      const img = getSourceImage(source.id);
-      if (!img) continue;
-      const srcCells = computeCells(source.slice, source.width, source.height);
-      const rect = srcCells[slot.cell.cellIndex];
-      if (!rect) continue;
-      const bounds = contentBoundsInRect(img, rect);
-      if (!bounds) continue;
-      const ratio = slotScale(scaleRef, slot);
-      const drawW = Math.max(1, Math.round(bounds.width * ratio));
-      const drawH = Math.max(1, Math.round(bounds.height * ratio));
-      const { dx, dy } = computeAnchorPos(anchor, boxSize, drawW, drawH, slot.yOffset);
-      const bitmap = await createImageBitmap(
-        img,
-        rect.x + bounds.x,
-        rect.y + bounds.y,
-        bounds.width,
-        bounds.height,
-        { resizeWidth: drawW, resizeHeight: drawH, resizeQuality: 'low' },
-      );
-      const override = source.slice.overrides[slot.cell.cellIndex] ?? {};
-      const flipH = !!override.flipH;
-      const flipV = !!override.flipV;
-      const slotX = i * boxSize.w + dx;
-      if (flipH || flipV) {
-        ctx.save();
-        ctx.translate(slotX + drawW / 2, dy + drawH / 2);
-        ctx.scale(flipH ? -1 : 1, flipV ? -1 : 1);
-        ctx.drawImage(bitmap, -drawW / 2, -drawH / 2);
-        ctx.restore();
-      } else {
-        ctx.drawImage(bitmap, slotX, dy);
-      }
-      bitmap.close();
-    }
-    const blob = await new Promise<Blob | null>((resolve) =>
-      canvas.toBlob((b) => resolve(b), 'image/png'),
+    const bytes = await composeAnimationStrip(active, builder, sourcesList, getSourceImage);
+    if (!bytes) return;
+    await window.api.saveImage(
+      `${safeAnimationFilename(active.name, active.fps)}.png`,
+      bytes,
     );
-    if (!blob) return;
-    const bytes = await blob.arrayBuffer();
-    const safeName = (animationName || 'animation').replace(/[^\w\-]+/g, '_');
-    await window.api.saveImage(`${safeName}.png`, bytes);
   }, [builder, sourcesList, getSourceImage]);
+
+  // Export every animation that's ready into the project folder. Used so the
+  // user can keep all strips alongside the project files for re-editing.
+  const exportAllAnimationsToProject = useCallback(async () => {
+    if (!projectFolder) return;
+    const skipped: string[] = [];
+    for (const anim of builder.animations) {
+      const bytes = await composeAnimationStrip(anim, builder, sourcesList, getSourceImage);
+      if (!bytes) {
+        skipped.push(anim.name);
+        continue;
+      }
+      const filename = `${safeAnimationFilename(anim.name, anim.fps)}.png`;
+      const sep = projectFolder.includes('\\') ? '\\' : '/';
+      const path = projectFolder.endsWith(sep)
+        ? projectFolder + filename
+        : `${projectFolder}${sep}${filename}`;
+      await window.api.writeFile(path, bytes);
+    }
+    if (skipped.length > 0) {
+      alert(
+        `Skipped ${skipped.length} unfinished animation${skipped.length > 1 ? 's' : ''}:\n` +
+          skipped.map((n) => `• ${n}`).join('\n') +
+          `\n\n(Need a scale lock + every slot filled to export.)`,
+      );
+    } else {
+      alert(`Exported ${builder.animations.length} animation strip(s) into:\n${projectFolder}`);
+    }
+  }, [builder, sourcesList, getSourceImage, projectFolder]);
 
   const runtime = activeId ? getRuntime(activeId) : null;
   const floater = runtime?.floater ?? null;
@@ -994,6 +1197,7 @@ export function App() {
               onSelectCell={setBuilderSelectedCell}
               selectedSlotIndex={builderSelectedSlot}
               onSelectSlot={setBuilderSelectedSlot}
+              onRecordPlacement={recordPlacement}
             />
             <BuilderSidebar
               state={builder}
@@ -1005,6 +1209,13 @@ export function App() {
               onDeselectSlot={() => setBuilderSelectedSlot(null)}
               onDeselectCell={() => setBuilderSelectedCell(null)}
               onExport={exportBuilderStrip}
+              onExportAllToProject={exportAllAnimationsToProject}
+              hasProjectFolder={!!projectFolder}
+              onRecordPlacement={recordPlacement}
+              onUndoPlacement={undoPlacement}
+              onRedoPlacement={redoPlacement}
+              canUndoPlacement={canUndoPlacement}
+              canRedoPlacement={canRedoPlacement}
               projectName={projectName}
               projectFolder={projectFolder}
               recentFolders={recentFolders}
@@ -1099,6 +1310,11 @@ export function App() {
             imageWidth={active?.width ?? 0}
             imageHeight={active?.height ?? 0}
             onExpandCanvas={handleExpandCanvas}
+            onFlipH={() => flipFloater('h')}
+            onFlipV={() => flipFloater('v')}
+            onCopy={copySelection}
+            onPaste={pasteSelection}
+            hasClipboard={!!selectionClipboard}
           />
         )}
           </>
@@ -1151,6 +1367,11 @@ function SelectSidebar({
   imageWidth,
   imageHeight,
   onExpandCanvas,
+  onFlipH,
+  onFlipV,
+  onCopy,
+  onPaste,
+  hasClipboard,
 }: {
   hasImage: boolean;
   hasSelection: boolean;
@@ -1166,6 +1387,11 @@ function SelectSidebar({
   imageWidth: number;
   imageHeight: number;
   onExpandCanvas: (target: number) => void;
+  onFlipH: () => void;
+  onFlipV: () => void;
+  onCopy: () => void;
+  onPaste: () => void;
+  hasClipboard: boolean;
 }) {
   const canConfirm = hasSelection && !selectionConfirmed && !hasFloater;
   return (
@@ -1233,6 +1459,54 @@ function SelectSidebar({
           <button onClick={onUndo} disabled={!canUndo}>
             Undo
           </button>
+        </div>
+      </section>
+      <section>
+        <label>Transform</label>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button
+            onClick={onFlipH}
+            disabled={!hasFloater && !(selectionConfirmed && hasSelection)}
+            style={{ flex: 1 }}
+            title="Flip the lifted selection horizontally (H)"
+          >
+            ↔ Flip H
+          </button>
+          <button
+            onClick={onFlipV}
+            disabled={!hasFloater && !(selectionConfirmed && hasSelection)}
+            style={{ flex: 1 }}
+            title="Flip the lifted selection vertically (V)"
+          >
+            ↕ Flip V
+          </button>
+        </div>
+        <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 4 }}>
+          Lifts the selection if it isn't already.
+        </div>
+      </section>
+      <section>
+        <label>Clipboard</label>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button
+            onClick={onCopy}
+            disabled={!hasFloater && !(selectionConfirmed && hasSelection)}
+            style={{ flex: 1 }}
+            title="Copy the selection's pixels to the in-app clipboard (Ctrl+C)"
+          >
+            Copy
+          </button>
+          <button
+            onClick={onPaste}
+            disabled={!hasClipboard || !hasImage}
+            style={{ flex: 1 }}
+            title="Paste as a new floater at its original position (Ctrl+V)"
+          >
+            Paste
+          </button>
+        </div>
+        <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 4 }}>
+          Paste lands at the copied rect's position; drag to move, Enter to commit.
         </div>
       </section>
       <section>

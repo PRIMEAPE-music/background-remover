@@ -10,6 +10,7 @@ import { SelectOverlay, type SelectTool } from './components/SelectOverlay';
 import { SourcesSidebar } from './components/SourcesSidebar';
 import { BuilderView, type SelectedCell } from './components/BuilderView';
 import { BuilderSidebar } from './components/BuilderSidebar';
+import { GeneratePage } from './components/GeneratePage';
 import {
   DEFAULT_BUILDER,
   getActiveAnimation,
@@ -1186,7 +1187,9 @@ export function App() {
           onRemove={removeSource}
           getImage={getSourceImage}
         />
-        {mode === 'builder' ? (
+        {mode === 'generate' ? (
+          <GeneratePage projectFolder={projectFolder} />
+        ) : mode === 'builder' ? (
           <>
             <BuilderView
               state={builder}

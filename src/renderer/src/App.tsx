@@ -34,6 +34,7 @@ import {
   removeColorGlobal,
   type DistanceMode,
 } from './lib/bg-removal';
+import { replaceColorGlobal } from './lib/color-replace';
 import {
   cloneImageData,
   clearRect as clearImageRect,
@@ -97,10 +98,13 @@ export function App() {
   const [tolerance, setTolerance] = useState(20);
   const [distanceMode, setDistanceMode] = useState<DistanceMode>('lab');
   const [floodFill, setFloodFill] = useState(false);
-  // Remove-BG tool: 'pick' picks + removes colors, 'erase' paints transparency
-  // with a circular brush.
-  const [removeBgTool, setRemoveBgTool] = useState<'pick' | 'erase'>('pick');
+  // Color tab tool: 'pick' picks + removes colors, 'erase' paints transparency
+  // with a circular brush, 'replace' swaps a source color (with tolerance) for
+  // a fill color, scaling the per-pixel deviation so shading is preserved.
+  const [removeBgTool, setRemoveBgTool] = useState<'pick' | 'erase' | 'replace'>('pick');
   const [eraseBrushSize, setEraseBrushSize] = useState(20);
+  const [replaceFill, setReplaceFill] = useState<RGB | null>(null);
+  const [replaceFillTolerance, setReplaceFillTolerance] = useState(20);
   // Ref for the last mouse position during an erase stroke, so fast drags
   // get interpolated instead of leaving gaps.
   const lastErasePosRef = useRef<{ x: number; y: number } | null>(null);
@@ -306,6 +310,9 @@ export function App() {
       const img = getSourceImage(activeId);
       if (!img) return;
       setPickedColor(color);
+      // Flood-remove only applies in the Remove tool — Replace just sets the
+      // source color and waits for the Apply button.
+      if (removeBgTool !== 'pick') return;
       if (floodFill) {
         const next = cloneImageData(img);
         removeColorFlood(next.data, next.width, next.height, x, y, {
@@ -316,7 +323,7 @@ export function App() {
         setSourceImage(activeId, next);
       }
     },
-    [activeId, floodFill, tolerance, distanceMode, getSourceImage, pushHistory, setSourceImage],
+    [activeId, removeBgTool, floodFill, tolerance, distanceMode, getSourceImage, pushHistory, setSourceImage],
   );
 
   const handleRemoveGlobal = useCallback(() => {
@@ -483,6 +490,60 @@ export function App() {
       setSourceImage(s.id, next);
     }
   }, [pickedColor, tolerance, distanceMode, sourcesList, getSourceImage, pushHistory, setSourceImage]);
+
+  const handleReplaceColor = useCallback(() => {
+    if (!activeId || !pickedColor || !replaceFill) return;
+    const img = getSourceImage(activeId);
+    if (!img) return;
+    const next = cloneImageData(img);
+    replaceColorGlobal(next.data, {
+      source: pickedColor,
+      fill: replaceFill,
+      sourceTolerance: tolerance,
+      fillTolerance: replaceFillTolerance,
+      mode: distanceMode,
+    });
+    pushHistory(activeId, img);
+    setSourceImage(activeId, next);
+  }, [
+    activeId,
+    pickedColor,
+    replaceFill,
+    tolerance,
+    replaceFillTolerance,
+    distanceMode,
+    getSourceImage,
+    pushHistory,
+    setSourceImage,
+  ]);
+
+  const handleReplaceColorAllSources = useCallback(() => {
+    if (!pickedColor || !replaceFill) return;
+    for (const s of sourcesList) {
+      const img = getSourceImage(s.id);
+      if (!img) continue;
+      const next = cloneImageData(img);
+      replaceColorGlobal(next.data, {
+        source: pickedColor,
+        fill: replaceFill,
+        sourceTolerance: tolerance,
+        fillTolerance: replaceFillTolerance,
+        mode: distanceMode,
+      });
+      pushHistory(s.id, img);
+      setSourceImage(s.id, next);
+    }
+  }, [
+    pickedColor,
+    replaceFill,
+    tolerance,
+    replaceFillTolerance,
+    distanceMode,
+    sourcesList,
+    getSourceImage,
+    pushHistory,
+    setSourceImage,
+  ]);
 
   /**
    * Eraser — mutates the active source's ImageData in place for speed (a
@@ -1235,9 +1296,15 @@ export function App() {
             <CanvasView
               imageMeta={imageMeta}
               getImage={getImage}
-              onPick={mode === 'remove' && removeBgTool === 'pick' ? handlePick : undefined}
+              onPick={
+                mode === 'remove' && (removeBgTool === 'pick' || removeBgTool === 'replace')
+                  ? handlePick
+                  : undefined
+              }
               onHover={handleHover}
-              pickEnabled={mode === 'remove' && removeBgTool === 'pick'}
+              pickEnabled={
+                mode === 'remove' && (removeBgTool === 'pick' || removeBgTool === 'replace')
+              }
               eraserEnabled={mode === 'remove' && removeBgTool === 'erase'}
               eraserBrushSize={eraseBrushSize}
               onErase={handleErase}
@@ -1272,6 +1339,12 @@ export function App() {
             onToolChange={setRemoveBgTool}
             eraseBrushSize={eraseBrushSize}
             onEraseBrushSizeChange={setEraseBrushSize}
+            replaceFill={replaceFill}
+            onReplaceFillChange={setReplaceFill}
+            replaceFillTolerance={replaceFillTolerance}
+            onReplaceFillToleranceChange={setReplaceFillTolerance}
+            onReplaceColor={handleReplaceColor}
+            onReplaceColorAllSources={handleReplaceColorAllSources}
           />
         ) : mode === 'slice' ? (
           <SliceSidebar

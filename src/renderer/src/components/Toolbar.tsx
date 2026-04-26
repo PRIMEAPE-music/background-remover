@@ -47,9 +47,9 @@ export function Toolbar({ filename, hasImage, mode, onModeChange, onOpen, onSave
             }
           >
             {m === 'remove'
-              ? 'Remove BG'
+              ? 'Color'
               : m === 'select'
-                ? 'Select + Move'
+                ? 'Transform'
                 : m === 'slice'
                   ? 'Slice'
                   : m === 'builder'

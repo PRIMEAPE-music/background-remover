@@ -3,6 +3,15 @@ import { tolerancePreviewColors, type DistanceMode } from '../lib/bg-removal';
 import { hexToRgb, rgbToHex, type RGB } from '../lib/color';
 
 export type ColorTabTool = 'pick' | 'erase' | 'replace';
+/**
+ * Replace algorithm:
+ *  • `delta` = LAB delta scaling. Tunable via `fillTolerance`. fillTolerance
+ *    equal to source preserves shading; 0 = flat fill; larger amplifies.
+ *  • `hue` = LCH hue rotation. Each pixel keeps its own L and C, only the
+ *    hue angle rotates to match `fill`'s hue. Best for tint removal where
+ *    you want shading exactly preserved per pixel.
+ */
+export type ReplaceMode = 'delta' | 'hue';
 
 export interface SidebarProps {
   tolerance: number;
@@ -39,6 +48,8 @@ export interface SidebarProps {
   /** Saved fill swatches — separate palette from source swatches. */
   fillSwatches: (RGB | null)[];
   onFillSwatchesChange: (s: (RGB | null)[]) => void;
+  replaceMode: ReplaceMode;
+  onReplaceModeChange: (m: ReplaceMode) => void;
 }
 
 const BG_PRESETS: { name: string; color: RGB }[] = [
@@ -102,6 +113,8 @@ export function Sidebar(props: SidebarProps) {
     onReplaceColorAllSources,
     fillSwatches,
     onFillSwatchesChange,
+    replaceMode,
+    onReplaceModeChange,
   } = props;
 
   return (
@@ -275,6 +288,32 @@ export function Sidebar(props: SidebarProps) {
 
       {tool === 'replace' && (
         <>
+          <Section title="Replace mode">
+            <div style={{ display: 'flex', gap: 6 }}>
+              <button
+                onClick={() => onReplaceModeChange('delta')}
+                className={replaceMode === 'delta' ? 'primary' : ''}
+                style={{ flex: 1, fontSize: 11 }}
+                title="LAB delta scaling. Fill tolerance controls how much variation survives."
+              >
+                Delta scale
+              </button>
+              <button
+                onClick={() => onReplaceModeChange('hue')}
+                className={replaceMode === 'hue' ? 'primary' : ''}
+                style={{ flex: 1, fontSize: 11 }}
+                title="LCH hue rotation. Per-pixel lightness + saturation preserved exactly; only hue changes."
+              >
+                Hue shift
+              </button>
+            </div>
+            <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 4, lineHeight: 1.4 }}>
+              {replaceMode === 'delta'
+                ? 'Re-centers each matched pixel around the fill color. Use the fill tolerance to flatten or amplify shading.'
+                : 'Rotates each matched pixel’s hue to match the fill color. Each pixel keeps its own brightness and saturation. Best for removing tints (e.g. magenta backlight) where shading should stay exactly the same.'}
+            </div>
+          </Section>
+
           <Section title="Fill color">
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
               <Swatch color={replaceFill} size={32} />
@@ -330,6 +369,7 @@ export function Sidebar(props: SidebarProps) {
             </div>
           </Section>
 
+          {replaceMode === 'delta' && (
           <Section title="Fill tolerance">
             <TolerancePreview picked={replaceFill} tolerance={replaceFillTolerance} mode={mode} />
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -364,6 +404,7 @@ export function Sidebar(props: SidebarProps) {
               Larger = exaggerate variation. Try matching source first.
             </div>
           </Section>
+          )}
         </>
       )}
 

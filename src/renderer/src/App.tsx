@@ -207,6 +207,31 @@ export function App() {
     }
   }, []);
 
+  // Fill-color swatches for the Replace tool — separate palette from source
+  // swatches because users typically save bg colors in one and character/fill
+  // tones in the other.
+  const [fillSwatches, setFillSwatchesState] = useState<(RGB | null)[]>(() => {
+    try {
+      const raw = localStorage.getItem('replace-fill-swatches');
+      if (!raw) return Array(12).fill(null);
+      const parsed = JSON.parse(raw) as (RGB | null)[];
+      if (!Array.isArray(parsed)) return Array(12).fill(null);
+      const out = Array(12).fill(null) as (RGB | null)[];
+      for (let i = 0; i < Math.min(12, parsed.length); i++) out[i] = parsed[i] ?? null;
+      return out;
+    } catch {
+      return Array(12).fill(null);
+    }
+  });
+  const setFillSwatches = useCallback((s: (RGB | null)[]) => {
+    setFillSwatchesState(s);
+    try {
+      localStorage.setItem('replace-fill-swatches', JSON.stringify(s));
+    } catch {
+      // ignored
+    }
+  }, []);
+
   useEffect(() => setPresets(loadPresets()), []);
 
   // ---------- Ingestion ----------
@@ -1345,6 +1370,8 @@ export function App() {
             onReplaceFillToleranceChange={setReplaceFillTolerance}
             onReplaceColor={handleReplaceColor}
             onReplaceColorAllSources={handleReplaceColorAllSources}
+            fillSwatches={fillSwatches}
+            onFillSwatchesChange={setFillSwatches}
           />
         ) : mode === 'slice' ? (
           <SliceSidebar

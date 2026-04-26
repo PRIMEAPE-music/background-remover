@@ -34,23 +34,8 @@ export interface GeneratedImage {
   path: string;
   /** Bare filename (no folder). */
   filename: string;
-  /** Sidecar metadata if present. */
-  meta: ImageMeta | null;
-  /** Bytes lazily loaded for thumbnails (cached). */
-  thumbBytes?: Uint8Array;
 }
 
-export interface ImageMeta {
-  prompt: string;
-  model: string;
-  aspectRatio: string;
-  size?: string;
-  /** Filename of reference image (relative to same folder), if used. */
-  referenceImage?: string;
-  createdAt: string;
-}
-
-export const SIDECAR_EXT = '.gen.json';
 const SAFE_NAME_RE = /[\\/:*?"<>|]+/g;
 
 /** Strip filesystem-illegal characters and collapse whitespace. */
@@ -89,33 +74,7 @@ export function joinPath(folder: string, filename: string): string {
   return folder.endsWith(sep) ? folder + filename : `${folder}${sep}${filename}`;
 }
 
-export function sidecarPathFor(imagePath: string): string {
-  return imagePath.replace(/\.png$/i, SIDECAR_EXT);
-}
-
-/** Read the sidecar JSON for an image path, returning null if absent/invalid. */
-export async function readSidecar(imagePath: string): Promise<ImageMeta | null> {
-  try {
-    const bytes = await window.api.readFile(sidecarPathFor(imagePath));
-    const text = new TextDecoder().decode(bytes);
-    const parsed = JSON.parse(text) as ImageMeta;
-    if (typeof parsed.prompt !== 'string') return null;
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
-export async function writeSidecar(imagePath: string, meta: ImageMeta): Promise<void> {
-  const bytes = new TextEncoder().encode(JSON.stringify(meta, null, 2));
-  const buf = bytes.buffer.slice(
-    bytes.byteOffset,
-    bytes.byteOffset + bytes.byteLength,
-  ) as ArrayBuffer;
-  await window.api.writeFile(sidecarPathFor(imagePath), buf);
-}
-
-/** Basename without extension, used to stem the sidecar pairing on rename. */
+/** Basename without extension. */
 export function stem(filename: string): string {
   return filename.replace(/\.png$/i, '');
 }

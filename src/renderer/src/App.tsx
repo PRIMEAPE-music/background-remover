@@ -34,7 +34,8 @@ import {
   removeColorGlobal,
   type DistanceMode,
 } from './lib/bg-removal';
-import { replaceColorGlobal } from './lib/color-replace';
+import { replaceColorGlobal, replaceColorHueShift } from './lib/color-replace';
+import type { ReplaceMode } from './components/Sidebar';
 import {
   cloneImageData,
   clearRect as clearImageRect,
@@ -105,6 +106,7 @@ export function App() {
   const [eraseBrushSize, setEraseBrushSize] = useState(20);
   const [replaceFill, setReplaceFill] = useState<RGB | null>(null);
   const [replaceFillTolerance, setReplaceFillTolerance] = useState(20);
+  const [replaceMode, setReplaceMode] = useState<ReplaceMode>('delta');
   // Ref for the last mouse position during an erase stroke, so fast drags
   // get interpolated instead of leaving gaps.
   const lastErasePosRef = useRef<{ x: number; y: number } | null>(null);
@@ -516,27 +518,41 @@ export function App() {
     }
   }, [pickedColor, tolerance, distanceMode, sourcesList, getSourceImage, pushHistory, setSourceImage]);
 
+  const applyReplaceTo = useCallback(
+    (data: Uint8ClampedArray, source: RGB, fill: RGB) => {
+      if (replaceMode === 'hue') {
+        replaceColorHueShift(data, {
+          source,
+          fill,
+          sourceTolerance: tolerance,
+          mode: distanceMode,
+        });
+      } else {
+        replaceColorGlobal(data, {
+          source,
+          fill,
+          sourceTolerance: tolerance,
+          fillTolerance: replaceFillTolerance,
+          mode: distanceMode,
+        });
+      }
+    },
+    [replaceMode, tolerance, replaceFillTolerance, distanceMode],
+  );
+
   const handleReplaceColor = useCallback(() => {
     if (!activeId || !pickedColor || !replaceFill) return;
     const img = getSourceImage(activeId);
     if (!img) return;
     const next = cloneImageData(img);
-    replaceColorGlobal(next.data, {
-      source: pickedColor,
-      fill: replaceFill,
-      sourceTolerance: tolerance,
-      fillTolerance: replaceFillTolerance,
-      mode: distanceMode,
-    });
+    applyReplaceTo(next.data, pickedColor, replaceFill);
     pushHistory(activeId, img);
     setSourceImage(activeId, next);
   }, [
     activeId,
     pickedColor,
     replaceFill,
-    tolerance,
-    replaceFillTolerance,
-    distanceMode,
+    applyReplaceTo,
     getSourceImage,
     pushHistory,
     setSourceImage,
@@ -548,22 +564,14 @@ export function App() {
       const img = getSourceImage(s.id);
       if (!img) continue;
       const next = cloneImageData(img);
-      replaceColorGlobal(next.data, {
-        source: pickedColor,
-        fill: replaceFill,
-        sourceTolerance: tolerance,
-        fillTolerance: replaceFillTolerance,
-        mode: distanceMode,
-      });
+      applyReplaceTo(next.data, pickedColor, replaceFill);
       pushHistory(s.id, img);
       setSourceImage(s.id, next);
     }
   }, [
     pickedColor,
     replaceFill,
-    tolerance,
-    replaceFillTolerance,
-    distanceMode,
+    applyReplaceTo,
     sourcesList,
     getSourceImage,
     pushHistory,
@@ -1372,6 +1380,8 @@ export function App() {
             onReplaceColorAllSources={handleReplaceColorAllSources}
             fillSwatches={fillSwatches}
             onFillSwatchesChange={setFillSwatches}
+            replaceMode={replaceMode}
+            onReplaceModeChange={setReplaceMode}
           />
         ) : mode === 'slice' ? (
           <SliceSidebar

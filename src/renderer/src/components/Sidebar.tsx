@@ -1,6 +1,8 @@
 import { useMemo } from 'react';
 import { tolerancePreviewColors, type DistanceMode } from '../lib/bg-removal';
-import { rgbToHex, type RGB } from '../lib/color';
+import { hexToRgb, rgbToHex, type RGB } from '../lib/color';
+
+export type ColorTabTool = 'pick' | 'erase' | 'replace';
 
 export interface SidebarProps {
   tolerance: number;
@@ -23,10 +25,17 @@ export interface SidebarProps {
   /** Saved color swatches (persistent in localStorage). */
   swatches: (RGB | null)[];
   onSwatchesChange: (s: (RGB | null)[]) => void;
-  tool: 'pick' | 'erase';
-  onToolChange: (t: 'pick' | 'erase') => void;
+  tool: ColorTabTool;
+  onToolChange: (t: ColorTabTool) => void;
   eraseBrushSize: number;
   onEraseBrushSizeChange: (n: number) => void;
+  // Color replace
+  replaceFill: RGB | null;
+  onReplaceFillChange: (c: RGB | null) => void;
+  replaceFillTolerance: number;
+  onReplaceFillToleranceChange: (n: number) => void;
+  onReplaceColor: () => void;
+  onReplaceColorAllSources: () => void;
 }
 
 const BG_PRESETS: { name: string; color: RGB }[] = [
@@ -82,6 +91,12 @@ export function Sidebar(props: SidebarProps) {
     onToolChange,
     eraseBrushSize,
     onEraseBrushSizeChange,
+    replaceFill,
+    onReplaceFillChange,
+    replaceFillTolerance,
+    onReplaceFillToleranceChange,
+    onReplaceColor,
+    onReplaceColorAllSources,
   } = props;
 
   return (
@@ -99,14 +114,14 @@ export function Sidebar(props: SidebarProps) {
     >
       <Section title="Tool">
         <div style={{ display: 'flex', gap: 4 }}>
-          {(['pick', 'erase'] as const).map((t) => (
+          {(['pick', 'erase', 'replace'] as const).map((t) => (
             <button
               key={t}
               onClick={() => onToolChange(t)}
               className={tool === t ? 'primary' : ''}
               style={{ flex: 1, textTransform: 'capitalize', fontSize: 11 }}
             >
-              {t === 'pick' ? 'Pick color' : 'Eraser'}
+              {t === 'pick' ? 'Remove' : t === 'erase' ? 'Eraser' : 'Replace'}
             </button>
           ))}
         </div>
@@ -144,7 +159,7 @@ export function Sidebar(props: SidebarProps) {
         )}
       </Section>
 
-      <Section title="Picked color">
+      <Section title={tool === 'replace' ? 'Source color' : 'Picked color'}>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           <Swatch color={pickedColor} size={32} />
           <div style={{ flex: 1, fontFamily: 'monospace', fontSize: 12 }}>
@@ -156,17 +171,26 @@ export function Sidebar(props: SidebarProps) {
                 </div>
               </>
             ) : (
-              <span style={{ color: 'var(--text-dim)' }}>Click image to pick</span>
+              <span style={{ color: 'var(--text-dim)' }}>Click image or use picker</span>
             )}
           </div>
+          <input
+            type="color"
+            value={pickedColor ? rgbToHex(pickedColor) : '#000000'}
+            onChange={(e) => onPickedColorChange(hexToRgb(e.target.value))}
+            title="Open color picker"
+            style={{ width: 32, height: 32, padding: 0, border: '1px solid var(--border)', background: 'transparent' }}
+          />
         </div>
-        <button
-          onClick={onAutoDetect}
-          disabled={!hasImage}
-          style={{ marginTop: 8, width: '100%' }}
-        >
-          Auto-detect from corners
-        </button>
+        {tool !== 'replace' && (
+          <button
+            onClick={onAutoDetect}
+            disabled={!hasImage}
+            style={{ marginTop: 8, width: '100%' }}
+          >
+            Auto-detect from corners
+          </button>
+        )}
       </Section>
 
       <Section title="Background presets">
@@ -221,7 +245,7 @@ export function Sidebar(props: SidebarProps) {
         </div>
       </Section>
 
-      <Section title="Tolerance">
+      <Section title={tool === 'replace' ? 'Source tolerance' : 'Tolerance'}>
         <TolerancePreview picked={pickedColor} tolerance={tolerance} mode={mode} />
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <input
@@ -244,6 +268,70 @@ export function Sidebar(props: SidebarProps) {
         </div>
       </Section>
 
+      {tool === 'replace' && (
+        <>
+          <Section title="Fill color">
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <Swatch color={replaceFill} size={32} />
+              <div style={{ flex: 1, fontFamily: 'monospace', fontSize: 12 }}>
+                {replaceFill ? (
+                  <>
+                    <div>{rgbToHex(replaceFill).toUpperCase()}</div>
+                    <div style={{ color: 'var(--text-dim)' }}>
+                      {replaceFill.r}, {replaceFill.g}, {replaceFill.b}
+                    </div>
+                  </>
+                ) : (
+                  <span style={{ color: 'var(--text-dim)' }}>Pick a fill color</span>
+                )}
+              </div>
+              <input
+                type="color"
+                value={replaceFill ? rgbToHex(replaceFill) : '#000000'}
+                onChange={(e) => onReplaceFillChange(hexToRgb(e.target.value))}
+                title="Open color picker"
+                style={{ width: 32, height: 32, padding: 0, border: '1px solid var(--border)', background: 'transparent' }}
+              />
+            </div>
+          </Section>
+
+          <Section title="Fill tolerance">
+            <TolerancePreview picked={replaceFill} tolerance={replaceFillTolerance} mode={mode} />
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                step={0.5}
+                value={replaceFillTolerance}
+                onChange={(e) => onReplaceFillToleranceChange(Number(e.target.value))}
+              />
+              <input
+                type="number"
+                min={0}
+                max={100}
+                step={0.5}
+                value={replaceFillTolerance}
+                onChange={(e) => onReplaceFillToleranceChange(Number(e.target.value))}
+                style={{ width: 60 }}
+              />
+              <button
+                onClick={() => onReplaceFillToleranceChange(tolerance)}
+                disabled={replaceFillTolerance === tolerance}
+                title="Match source tolerance — preserves the source's variation amplitude"
+                style={{ fontSize: 10, padding: '2px 6px' }}
+              >
+                = src
+              </button>
+            </div>
+            <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 4, lineHeight: 1.4 }}>
+              0 = flat fill (lose shading). Equal to source = preserve shading.
+              Larger = exaggerate variation. Try matching source first.
+            </div>
+          </Section>
+        </>
+      )}
+
       <Section title="Distance metric">
         <div style={{ display: 'flex', gap: 6 }}>
           <button
@@ -263,42 +351,69 @@ export function Sidebar(props: SidebarProps) {
         </div>
       </Section>
 
-      <Section title="Removal mode">
-        <label style={{ display: 'flex', alignItems: 'center', gap: 8, textTransform: 'none', fontSize: 12, color: 'var(--text)' }}>
-          <input
-            type="checkbox"
-            checked={floodFill}
-            onChange={(e) => onFloodFillChange(e.target.checked)}
-          />
-          Contiguous flood-fill (click-only)
-        </label>
-        <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 4 }}>
-          {floodFill
-            ? 'Click removes connected region only.'
-            : 'Click removes all matching pixels globally.'}
-        </div>
-      </Section>
+      {tool === 'pick' && (
+        <Section title="Removal mode">
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, textTransform: 'none', fontSize: 12, color: 'var(--text)' }}>
+            <input
+              type="checkbox"
+              checked={floodFill}
+              onChange={(e) => onFloodFillChange(e.target.checked)}
+            />
+            Contiguous flood-fill (click-only)
+          </label>
+          <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 4 }}>
+            {floodFill
+              ? 'Click removes connected region only.'
+              : 'Click removes all matching pixels globally.'}
+          </div>
+        </Section>
+      )}
 
       <Section title="Actions">
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <button
-            className="primary"
-            onClick={onRemoveGlobal}
-            disabled={!hasImage || !pickedColor}
-          >
-            Remove picked color (active)
-          </button>
-          <button
-            onClick={onRemoveGlobalAllSources}
-            disabled={!pickedColor || sourceCount < 2}
-            title={
-              sourceCount < 2
-                ? 'Load more than one source to batch-apply'
-                : 'Runs the picked color + tolerance across every loaded source'
-            }
-          >
-            Remove picked color (all {sourceCount} sources)
-          </button>
+          {tool === 'replace' ? (
+            <>
+              <button
+                className="primary"
+                onClick={onReplaceColor}
+                disabled={!hasImage || !pickedColor || !replaceFill}
+              >
+                Apply replace (active)
+              </button>
+              <button
+                onClick={onReplaceColorAllSources}
+                disabled={!pickedColor || !replaceFill || sourceCount < 2}
+                title={
+                  sourceCount < 2
+                    ? 'Load more than one source to batch-apply'
+                    : 'Runs the replace across every loaded source'
+                }
+              >
+                Apply replace (all {sourceCount} sources)
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                className="primary"
+                onClick={onRemoveGlobal}
+                disabled={!hasImage || !pickedColor}
+              >
+                Remove picked color (active)
+              </button>
+              <button
+                onClick={onRemoveGlobalAllSources}
+                disabled={!pickedColor || sourceCount < 2}
+                title={
+                  sourceCount < 2
+                    ? 'Load more than one source to batch-apply'
+                    : 'Runs the picked color + tolerance across every loaded source'
+                }
+              >
+                Remove picked color (all {sourceCount} sources)
+              </button>
+            </>
+          )}
           <button onClick={onUndo} disabled={!canUndo}>
             Undo
           </button>

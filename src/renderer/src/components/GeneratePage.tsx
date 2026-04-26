@@ -5,16 +5,11 @@ import {
   getDefaultFolder,
   joinPath,
   pickFilename,
-  readSidecar,
   setDefaultFolder,
-  sidecarPathFor,
   stem,
-  writeSidecar,
   type GeneratedImage,
-  type ImageMeta,
   type PromptRow,
   type RowStatus,
-  SIDECAR_EXT,
 } from '../lib/generate';
 import type { GeminiAspect, GeminiSize } from '../../../preload';
 
@@ -165,7 +160,7 @@ export function GeneratePage({ projectFolder }: GeneratePageProps) {
   // ---------- Image list (active folder) ----------
   const [images, setImages] = useState<GeneratedImage[]>([]);
   const [thumbUrls, setThumbUrls] = useState<Record<string, string>>({});
-  const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const [viewingPath, setViewingPath] = useState<string | null>(null);
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState<string>('');
 
@@ -182,12 +177,10 @@ export function GeneratePage({ projectFolder }: GeneratePageProps) {
       return;
     }
     paths.sort();
-    const next: GeneratedImage[] = [];
-    for (const p of paths) {
-      const filename = p.split(/[\\/]/).pop() ?? p;
-      const meta = await readSidecar(p);
-      next.push({ path: p, filename, meta });
-    }
+    const next: GeneratedImage[] = paths.map((p) => ({
+      path: p,
+      filename: p.split(/[\\/]/).pop() ?? p,
+    }));
     setImages(next);
   }, [effectiveFolder]);
 
@@ -285,24 +278,6 @@ export function GeneratePage({ projectFolder }: GeneratePageProps) {
       return next;
     });
 
-    // If reference image is set, also persist a copy alongside outputs so the
-    // sidecar's `referenceImage` filename resolves later.
-    let refImageFilename: string | undefined;
-    if (referenceImage) {
-      refImageFilename = `_ref_${referenceImage.filename}`;
-      try {
-        const buf = referenceImage.bytes.buffer.slice(
-          referenceImage.bytes.byteOffset,
-          referenceImage.bytes.byteOffset + referenceImage.bytes.byteLength,
-        ) as ArrayBuffer;
-        await window.api.writeFile(joinPath(effectiveFolder, refImageFilename), buf);
-        existing.add(refImageFilename.toLowerCase());
-      } catch {
-        // best-effort; sidecar still records the original filename if write fails
-        refImageFilename = referenceImage.filename;
-      }
-    }
-
     for (const row of valid) {
       if (cancelRef.current.flag) {
         setStatuses((s) => ({ ...s, [row.id]: { kind: 'cancelled' } }));
@@ -362,16 +337,6 @@ export function GeneratePage({ projectFolder }: GeneratePageProps) {
           const fullPath = joinPath(effectiveFolder, filename);
           await window.api.writeFile(fullPath, res.imageBytes);
           existing.add(filename.toLowerCase());
-
-          const meta: ImageMeta = {
-            prompt: row.prompt,
-            model: 'gemini-3-pro-image-preview',
-            aspectRatio,
-            size,
-            referenceImage: refImageFilename,
-            createdAt: new Date().toISOString(),
-          };
-          await writeSidecar(fullPath, meta);
           saved.push(filename);
           setSessionCount((n) => n + 1);
         }
@@ -421,43 +386,32 @@ export function GeneratePage({ projectFolder }: GeneratePageProps) {
     const newPath = joinPath(effectiveFolder, newPng);
     try {
       await window.api.renameFile(img.path, newPath);
-      // Move sidecar too if it exists.
-      if (img.meta) {
-        await window.api.renameFile(sidecarPathFor(img.path), sidecarPathFor(newPath));
-      }
     } catch (e) {
       alert(`Rename failed: ${(e as Error).message}`);
     }
     setRenamingPath(null);
     refreshImages();
-    if (selectedPath === img.path) setSelectedPath(newPath);
-  }, [renamingPath, renameDraft, images, effectiveFolder, refreshImages, selectedPath]);
+    if (viewingPath === img.path) setViewingPath(newPath);
+  }, [renamingPath, renameDraft, images, effectiveFolder, refreshImages, viewingPath]);
 
   const deleteImage = useCallback(
     async (img: GeneratedImage) => {
       if (!confirm(`Delete ${img.filename}? This cannot be undone.`)) return;
       try {
         await window.api.unlinkFile(img.path);
-        if (img.meta) {
-          try {
-            await window.api.unlinkFile(sidecarPathFor(img.path));
-          } catch {
-            // sidecar may already be gone
-          }
-        }
       } catch (e) {
         alert(`Delete failed: ${(e as Error).message}`);
         return;
       }
-      if (selectedPath === img.path) setSelectedPath(null);
+      if (viewingPath === img.path) setViewingPath(null);
       refreshImages();
     },
-    [refreshImages, selectedPath],
+    [refreshImages, viewingPath],
   );
 
-  const selectedImage = useMemo(
-    () => images.find((i) => i.path === selectedPath) ?? null,
-    [images, selectedPath],
+  const viewingImage = useMemo(
+    () => images.find((i) => i.path === viewingPath) ?? null,
+    [images, viewingPath],
   );
 
   const totalQueued = useMemo(
@@ -506,220 +460,177 @@ export function GeneratePage({ projectFolder }: GeneratePageProps) {
           </span>
         </div>
         <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
-          <div
-            style={{
-              flex: 1,
-              overflow: 'auto',
-              padding: 12,
-              display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
-              gridAutoRows: 'min-content',
-              gap: 12,
-              alignContent: 'start',
-            }}
-          >
-            {images.length === 0 && (
-              <div
-                style={{
-                  gridColumn: '1 / -1',
-                  color: 'var(--text-dim)',
-                  fontSize: 12,
-                  padding: 24,
-                  textAlign: 'center',
-                }}
-              >
-                {effectiveFolder
-                  ? 'No images yet. Run a generation to see them here.'
-                  : 'Pick a save folder in the sidebar to get started.'}
-              </div>
-            )}
-            {images.map((img) => {
-              const url = thumbUrls[img.path];
-              const isSelected = selectedPath === img.path;
-              return (
-                <div
-                  key={img.path}
-                  onClick={() => setSelectedPath(img.path)}
-                  style={{
-                    border: isSelected ? '2px solid var(--accent)' : '1px solid var(--border)',
-                    borderRadius: 6,
-                    padding: 6,
-                    background: 'var(--panel)',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: 4,
-                    cursor: 'pointer',
-                  }}
-                >
-                  <div
-                    style={{
-                      width: '100%',
-                      aspectRatio: '1 / 1',
-                      background:
-                        'linear-gradient(45deg, #3a3a44 25%, transparent 25%), linear-gradient(-45deg, #3a3a44 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #3a3a44 75%), linear-gradient(-45deg, transparent 75%, #3a3a44 75%) #2a2a30',
-                      backgroundSize: '12px 12px',
-                      backgroundPosition: '0 0, 0 6px, 6px -6px, -6px 0',
-                      borderRadius: 4,
-                      overflow: 'hidden',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                    }}
-                  >
-                    {url ? (
-                      <img
-                        src={url}
-                        alt={img.filename}
-                        style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
-                      />
-                    ) : (
-                      <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>…</span>
-                    )}
-                  </div>
-                  {renamingPath === img.path ? (
-                    <input
-                      autoFocus
-                      value={renameDraft}
-                      onChange={(e) => setRenameDraft(e.target.value)}
-                      onBlur={commitRename}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') commitRename();
-                        else if (e.key === 'Escape') setRenamingPath(null);
-                      }}
-                      style={{ fontSize: 11, width: '100%' }}
-                    />
-                  ) : (
-                    <div
-                      style={{
-                        fontSize: 11,
-                        whiteSpace: 'nowrap',
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                      }}
-                      title={img.filename}
-                    >
-                      {img.filename}
-                    </div>
-                  )}
-                  <div style={{ display: 'flex', gap: 4 }}>
-                    <button
-                      style={{ flex: 1, fontSize: 11, padding: '2px 4px' }}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        startRename(img);
-                      }}
-                    >
-                      Rename
-                    </button>
-                    <button
-                      style={{ flex: 1, fontSize: 11, padding: '2px 4px' }}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        deleteImage(img);
-                      }}
-                    >
-                      Delete
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-          {selectedImage && (
-            <aside
+          {viewingImage ? (
+            <div
               style={{
-                width: 260,
-                borderLeft: '1px solid var(--border)',
-                background: 'var(--panel)',
-                padding: 12,
-                overflowY: 'auto',
-                fontSize: 12,
+                flex: 1,
                 display: 'flex',
                 flexDirection: 'column',
-                gap: 10,
+                background: 'var(--bg)',
+                overflow: 'hidden',
               }}
             >
               <div
                 style={{
                   display: 'flex',
-                  justifyContent: 'space-between',
                   alignItems: 'center',
+                  gap: 8,
+                  padding: '6px 12px',
+                  borderBottom: '1px solid var(--border)',
+                  background: 'var(--panel)',
+                  fontSize: 12,
                 }}
               >
-                <strong>Metadata</strong>
-                <button
-                  onClick={() => setSelectedPath(null)}
-                  style={{ fontSize: 11, padding: '2px 6px' }}
-                >
-                  Close
+                <button onClick={() => setViewingPath(null)} style={{ fontSize: 11 }}>
+                  ← Back
                 </button>
+                <span style={{ wordBreak: 'break-all' }}>{viewingImage.filename}</span>
               </div>
-              <div>
-                <div style={{ color: 'var(--text-dim)', fontSize: 11 }}>File</div>
-                <div style={{ wordBreak: 'break-all' }}>{selectedImage.filename}</div>
+              <div
+                style={{
+                  flex: 1,
+                  overflow: 'auto',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  padding: 16,
+                  background:
+                    'linear-gradient(45deg, #3a3a44 25%, transparent 25%), linear-gradient(-45deg, #3a3a44 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #3a3a44 75%), linear-gradient(-45deg, transparent 75%, #3a3a44 75%) #2a2a30',
+                  backgroundSize: '20px 20px',
+                  backgroundPosition: '0 0, 0 10px, 10px -10px, -10px 0',
+                }}
+              >
+                {thumbUrls[viewingImage.path] ? (
+                  <img
+                    src={thumbUrls[viewingImage.path]}
+                    alt={viewingImage.filename}
+                    style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
+                  />
+                ) : (
+                  <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>Loading…</span>
+                )}
               </div>
-              {selectedImage.meta ? (
-                <>
-                  <div>
-                    <div style={{ color: 'var(--text-dim)', fontSize: 11 }}>Prompt</div>
-                    <div style={{ whiteSpace: 'pre-wrap' }}>{selectedImage.meta.prompt}</div>
-                  </div>
-                  <div>
-                    <div style={{ color: 'var(--text-dim)', fontSize: 11 }}>Model</div>
-                    <div>{selectedImage.meta.model}</div>
-                  </div>
-                  <div>
-                    <div style={{ color: 'var(--text-dim)', fontSize: 11 }}>Aspect / size</div>
-                    <div>
-                      {selectedImage.meta.aspectRatio}
-                      {selectedImage.meta.size ? ` · ${selectedImage.meta.size}` : ''}
-                    </div>
-                  </div>
-                  {selectedImage.meta.referenceImage && (
-                    <div>
-                      <div style={{ color: 'var(--text-dim)', fontSize: 11 }}>Reference</div>
-                      <div style={{ wordBreak: 'break-all' }}>
-                        {selectedImage.meta.referenceImage}
-                      </div>
-                    </div>
-                  )}
-                  <div>
-                    <div style={{ color: 'var(--text-dim)', fontSize: 11 }}>Created</div>
-                    <div>{new Date(selectedImage.meta.createdAt).toLocaleString()}</div>
-                  </div>
-                  <button
-                    onClick={() => {
-                      navigator.clipboard.writeText(selectedImage.meta!.prompt);
-                    }}
-                    style={{ fontSize: 11 }}
-                  >
-                    Copy prompt
-                  </button>
-                  <button
-                    onClick={() => {
-                      const m = selectedImage.meta!;
-                      setRows((rs) => [
-                        ...rs,
-                        {
-                          id: newRowId(),
-                          name: stem(selectedImage.filename),
-                          prompt: m.prompt,
-                          count: 1,
-                        },
-                      ]);
-                    }}
-                    style={{ fontSize: 11 }}
-                  >
-                    Re-use prompt as new row
-                  </button>
-                </>
-              ) : (
-                <div style={{ color: 'var(--text-dim)' }}>
-                  No sidecar metadata ({SIDECAR_EXT}). This image was either added externally or
-                  predates the metadata feature.
+            </div>
+          ) : (
+            <div
+              style={{
+                flex: 1,
+                overflow: 'auto',
+                padding: 12,
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
+                gridAutoRows: 'min-content',
+                gap: 12,
+                alignContent: 'start',
+              }}
+            >
+              {images.length === 0 && (
+                <div
+                  style={{
+                    gridColumn: '1 / -1',
+                    color: 'var(--text-dim)',
+                    fontSize: 12,
+                    padding: 24,
+                    textAlign: 'center',
+                  }}
+                >
+                  {effectiveFolder
+                    ? 'No images yet. Run a generation to see them here.'
+                    : 'Pick a save folder in the sidebar to get started.'}
                 </div>
               )}
-            </aside>
+              {images.map((img) => {
+                const url = thumbUrls[img.path];
+                return (
+                  <div
+                    key={img.path}
+                    style={{
+                      border: '1px solid var(--border)',
+                      borderRadius: 6,
+                      padding: 6,
+                      background: 'var(--panel)',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 4,
+                    }}
+                  >
+                    <div
+                      onClick={() => setViewingPath(img.path)}
+                      style={{
+                        width: '100%',
+                        aspectRatio: '1 / 1',
+                        background:
+                          'linear-gradient(45deg, #3a3a44 25%, transparent 25%), linear-gradient(-45deg, #3a3a44 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #3a3a44 75%), linear-gradient(-45deg, transparent 75%, #3a3a44 75%) #2a2a30',
+                        backgroundSize: '12px 12px',
+                        backgroundPosition: '0 0, 0 6px, 6px -6px, -6px 0',
+                        borderRadius: 4,
+                        overflow: 'hidden',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        cursor: 'zoom-in',
+                      }}
+                      title="Click to view full size"
+                    >
+                      {url ? (
+                        <img
+                          src={url}
+                          alt={img.filename}
+                          style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
+                        />
+                      ) : (
+                        <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>…</span>
+                      )}
+                    </div>
+                    {renamingPath === img.path ? (
+                      <input
+                        autoFocus
+                        value={renameDraft}
+                        onChange={(e) => setRenameDraft(e.target.value)}
+                        onBlur={commitRename}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') commitRename();
+                          else if (e.key === 'Escape') setRenamingPath(null);
+                        }}
+                        style={{ fontSize: 11, width: '100%' }}
+                      />
+                    ) : (
+                      <div
+                        style={{
+                          fontSize: 11,
+                          whiteSpace: 'nowrap',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                        }}
+                        title={img.filename}
+                      >
+                        {img.filename}
+                      </div>
+                    )}
+                    <div style={{ display: 'flex', gap: 4 }}>
+                      <button
+                        style={{ flex: 1, fontSize: 11, padding: '2px 4px' }}
+                        onClick={() => setViewingPath(img.path)}
+                      >
+                        View
+                      </button>
+                      <button
+                        style={{ flex: 1, fontSize: 11, padding: '2px 4px' }}
+                        onClick={() => startRename(img)}
+                      >
+                        Rename
+                      </button>
+                      <button
+                        style={{ flex: 1, fontSize: 11, padding: '2px 4px' }}
+                        onClick={() => deleteImage(img)}
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           )}
         </div>
       </div>

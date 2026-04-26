@@ -36,6 +36,9 @@ export interface SidebarProps {
   onReplaceFillToleranceChange: (n: number) => void;
   onReplaceColor: () => void;
   onReplaceColorAllSources: () => void;
+  /** Saved fill swatches — separate palette from source swatches. */
+  fillSwatches: (RGB | null)[];
+  onFillSwatchesChange: (s: (RGB | null)[]) => void;
 }
 
 const BG_PRESETS: { name: string; color: RGB }[] = [
@@ -97,6 +100,8 @@ export function Sidebar(props: SidebarProps) {
     onReplaceFillToleranceChange,
     onReplaceColor,
     onReplaceColorAllSources,
+    fillSwatches,
+    onFillSwatchesChange,
   } = props;
 
   return (
@@ -292,6 +297,36 @@ export function Sidebar(props: SidebarProps) {
                 title="Open color picker"
                 style={{ width: 32, height: 32, padding: 0, border: '1px solid var(--border)', background: 'transparent' }}
               />
+            </div>
+          </Section>
+
+          <Section title="Fill swatches">
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 6 }}>
+              {fillSwatches.map((sw, i) => (
+                <SwatchSlot
+                  key={i}
+                  color={sw}
+                  hasPicked={!!replaceFill}
+                  onClick={() => {
+                    if (sw) {
+                      onReplaceFillChange(sw);
+                    } else if (replaceFill) {
+                      const next = [...fillSwatches];
+                      next[i] = replaceFill;
+                      onFillSwatchesChange(next);
+                    }
+                  }}
+                  onRightClick={() => {
+                    const next = [...fillSwatches];
+                    next[i] = null;
+                    onFillSwatchesChange(next);
+                  }}
+                />
+              ))}
+            </div>
+            <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 4 }}>
+              Click an empty slot with a fill color set to save it. Click a
+              filled slot to re-pick it. Right-click to clear.
             </div>
           </Section>
 

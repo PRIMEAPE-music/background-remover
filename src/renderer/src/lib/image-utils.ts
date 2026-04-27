@@ -252,6 +252,39 @@ export function compositeOnto(
   return new ImageData(out, iw, ih);
 }
 
+/**
+ * Composite a rotated `floater` onto `image`, with the floater's center placed
+ * at (centerX, centerY) and rotated by `angleRad` clockwise (matches CSS
+ * `transform: rotate`). Returns new ImageData. Uses Canvas2D so we get free
+ * bilinear interpolation for the rotated source — fine for one-shot commits.
+ */
+export function compositeRotated(
+  image: ImageData,
+  floater: ImageData,
+  centerX: number,
+  centerY: number,
+  angleRad: number,
+): ImageData {
+  const target = document.createElement('canvas');
+  target.width = image.width;
+  target.height = image.height;
+  const tctx = target.getContext('2d')!;
+  tctx.putImageData(image, 0, 0);
+
+  // Stamp floater into its own canvas so drawImage can interpolate it.
+  const f = document.createElement('canvas');
+  f.width = floater.width;
+  f.height = floater.height;
+  f.getContext('2d')!.putImageData(floater, 0, 0);
+
+  tctx.save();
+  tctx.translate(centerX, centerY);
+  tctx.rotate(angleRad);
+  tctx.drawImage(f, -floater.width / 2, -floater.height / 2);
+  tctx.restore();
+  return tctx.getImageData(0, 0, image.width, image.height);
+}
+
 // Cached 2×2-cell pattern canvas, keyed by cell size. Using a repeating
 // CanvasPattern collapses the O(w·h/size²) fillRect loop into a single fillRect.
 const checkerPatternCache = new Map<number, HTMLCanvasElement>();

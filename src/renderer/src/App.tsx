@@ -40,6 +40,7 @@ import {
   cloneImageData,
   clearRect as clearImageRect,
   compositeOnto,
+  compositeRotated,
   eraseCircle,
   eraseStroke,
   expandCanvas,
@@ -76,6 +77,8 @@ export function App() {
     updateMeta,
     pushHistory,
     popHistory,
+    pushFuture,
+    popFuture,
     dropLastHistory,
     getImage: getSourceImage,
     getRuntime,
@@ -621,8 +624,10 @@ export function App() {
 
   const handleUndo = useCallback(() => {
     if (!activeId) return;
+    const cur = getSourceImage(activeId);
     const prev = popHistory(activeId);
     if (!prev) return;
+    if (cur) pushFuture(activeId, cur);
     setSourceImage(activeId, prev);
     // Any in-flight selection on this source is invalidated by undo.
     setSourceFloater(activeId, null);
@@ -634,7 +639,29 @@ export function App() {
       selectionOffset: null,
       selectionConfirmed: false,
     });
-  }, [activeId, popHistory, setSourceImage, setSourceFloater, setLiftSnapshot, setLifting, updateMeta]);
+    setFloaterAngle(0);
+  }, [activeId, getSourceImage, popHistory, pushFuture, setSourceImage, setSourceFloater, setLiftSnapshot, setLifting, updateMeta]);
+
+  const handleRedo = useCallback(() => {
+    if (!activeId) return;
+    const cur = getSourceImage(activeId);
+    const next = popFuture(activeId);
+    if (!next) return;
+    // keepFuture: we're moving forward in the redo trail, not creating a new
+    // edit, so the rest of the future stack must remain reachable.
+    if (cur) pushHistory(activeId, cur, { keepFuture: true });
+    setSourceImage(activeId, next);
+    setSourceFloater(activeId, null);
+    setLiftSnapshot(activeId, null);
+    setLifting(activeId, false);
+    updateMeta(activeId, {
+      selectionRect: null,
+      lassoPolygon: null,
+      selectionOffset: null,
+      selectionConfirmed: false,
+    });
+    setFloaterAngle(0);
+  }, [activeId, getSourceImage, popFuture, pushHistory, setSourceImage, setSourceFloater, setLiftSnapshot, setLifting, updateMeta]);
 
   // ---------- Slice / export ----------
 
@@ -804,6 +831,11 @@ export function App() {
 
   // ---------- Select + Move ----------
 
+  // Floater rotation in radians. App-scoped because only the active source's
+  // floater is editable at a time (auto-commit fires on source switch). Reset
+  // to 0 whenever the floater is cleared (commit / cancel / erase / paste).
+  const [floaterAngle, setFloaterAngle] = useState(0);
+
   const commitFloater = useCallback(
     (id: string | null = activeId) => {
       if (!id) return;
@@ -821,9 +853,19 @@ export function App() {
           selectionOffset: null,
           selectionConfirmed: false,
         });
+        setFloaterAngle(0);
         return;
       }
-      const next = compositeOnto(img, rt.floater, meta.selectionOffset.x, meta.selectionOffset.y);
+      const next =
+        floaterAngle !== 0
+          ? compositeRotated(
+              img,
+              rt.floater,
+              meta.selectionOffset.x + rt.floater.width / 2,
+              meta.selectionOffset.y + rt.floater.height / 2,
+              floaterAngle,
+            )
+          : compositeOnto(img, rt.floater, meta.selectionOffset.x, meta.selectionOffset.y);
       setSourceImage(id, next);
       setSourceFloater(id, null);
       setLiftSnapshot(id, null);
@@ -834,8 +876,9 @@ export function App() {
         selectionOffset: null,
         selectionConfirmed: false,
       });
+      setFloaterAngle(0);
     },
-    [activeId, sourcesList, getRuntime, getSourceImage, setSourceImage, setSourceFloater, setLiftSnapshot, setLifting, updateMeta],
+    [activeId, floaterAngle, sourcesList, getRuntime, getSourceImage, setSourceImage, setSourceFloater, setLiftSnapshot, setLifting, updateMeta],
   );
 
   const cancelSelection = useCallback(() => {
@@ -854,6 +897,7 @@ export function App() {
       selectionOffset: null,
       selectionConfirmed: false,
     });
+    setFloaterAngle(0);
   }, [activeId, getRuntime, setSourceImage, dropLastHistory, setSourceFloater, setLiftSnapshot, setLifting, updateMeta]);
 
   const defineSelection = useCallback(
@@ -916,6 +960,7 @@ export function App() {
       selectionOffset: null,
       selectionConfirmed: false,
     });
+    setFloaterAngle(0);
   }, [activeId, setSourceFloater, setLifting, updateMeta]);
 
   /**
@@ -970,6 +1015,34 @@ export function App() {
     },
     [activeId, ensureFloaterLifted, setSourceFloater],
   );
+
+  /**
+   * Sidebar / overlay rotate handlers. The angle is tracked separately from
+   * the floater bytes — applied only at commit-time via compositeRotated, so
+   * repeated rotations don't compound interpolation loss.
+   */
+  const startRotation = useCallback(() => {
+    // Lift the selection so the rotation handle has something to rotate.
+    ensureFloaterLifted();
+  }, [ensureFloaterLifted]);
+
+  const rotateFloaterBy = useCallback(
+    (deltaRad: number) => {
+      ensureFloaterLifted();
+      setFloaterAngle((a) => a + deltaRad);
+    },
+    [ensureFloaterLifted],
+  );
+
+  const setFloaterAngleAbsolute = useCallback(
+    (angle: number) => {
+      ensureFloaterLifted();
+      setFloaterAngle(angle);
+    },
+    [ensureFloaterLifted],
+  );
+
+  const resetFloaterRotation = useCallback(() => setFloaterAngle(0), []);
 
   // App-scoped clipboard for Select+Move copy/paste. Holds the most recent
   // copied selection's pixels + the rect it came from so paste lands at the
@@ -1028,6 +1101,7 @@ export function App() {
       selectionOffset: { x: rect.x, y: rect.y },
       selectionConfirmed: true,
     });
+    setFloaterAngle(0);
   }, [
     activeId,
     active,
@@ -1262,9 +1336,11 @@ export function App() {
         offset={active.selectionOffset}
         confirmed={active.selectionConfirmed}
         floater={floater}
+        angle={floaterAngle}
         onDefine={defineSelection}
         onConfirm={confirmSelection}
         onMove={moveSelection}
+        onRotate={setFloaterAngleAbsolute}
         onCommit={() => commitFloater(activeId)}
         onCancel={cancelSelection}
         onEraseFloater={eraseFloater}
@@ -1440,6 +1516,8 @@ export function App() {
             onCancel={cancelSelection}
             onUndo={handleUndo}
             canUndo={(active?.historyLen ?? 0) > 0}
+            onRedo={handleRedo}
+            canRedo={(active?.futureLen ?? 0) > 0}
             imageWidth={active?.width ?? 0}
             imageHeight={active?.height ?? 0}
             onExpandCanvas={handleExpandCanvas}
@@ -1448,6 +1526,11 @@ export function App() {
             onCopy={copySelection}
             onPaste={pasteSelection}
             hasClipboard={!!selectionClipboard}
+            angle={floaterAngle}
+            onStartRotation={startRotation}
+            onRotateBy={rotateFloaterBy}
+            onSetAngle={setFloaterAngleAbsolute}
+            onResetRotation={resetFloaterRotation}
           />
         )}
           </>
@@ -1497,6 +1580,8 @@ function SelectSidebar({
   onCancel,
   onUndo,
   canUndo,
+  onRedo,
+  canRedo,
   imageWidth,
   imageHeight,
   onExpandCanvas,
@@ -1505,6 +1590,11 @@ function SelectSidebar({
   onCopy,
   onPaste,
   hasClipboard,
+  angle,
+  onStartRotation,
+  onRotateBy,
+  onSetAngle,
+  onResetRotation,
 }: {
   hasImage: boolean;
   hasSelection: boolean;
@@ -1517,6 +1607,8 @@ function SelectSidebar({
   onCancel: () => void;
   onUndo: () => void;
   canUndo: boolean;
+  onRedo: () => void;
+  canRedo: boolean;
   imageWidth: number;
   imageHeight: number;
   onExpandCanvas: (target: number) => void;
@@ -1525,6 +1617,11 @@ function SelectSidebar({
   onCopy: () => void;
   onPaste: () => void;
   hasClipboard: boolean;
+  angle: number;
+  onStartRotation: () => void;
+  onRotateBy: (deltaRad: number) => void;
+  onSetAngle: (rad: number) => void;
+  onResetRotation: () => void;
 }) {
   const canConfirm = hasSelection && !selectionConfirmed && !hasFloater;
   return (
@@ -1589,9 +1686,14 @@ function SelectSidebar({
           <button onClick={onCancel} disabled={!hasSelection && !hasFloater}>
             Cancel / clear
           </button>
-          <button onClick={onUndo} disabled={!canUndo}>
-            Undo
-          </button>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button onClick={onUndo} disabled={!canUndo} style={{ flex: 1 }}>
+              Undo
+            </button>
+            <button onClick={onRedo} disabled={!canRedo} style={{ flex: 1 }}>
+              Redo
+            </button>
+          </div>
         </div>
       </section>
       <section>
@@ -1616,6 +1718,60 @@ function SelectSidebar({
         </div>
         <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 4 }}>
           Lifts the selection if it isn't already.
+        </div>
+      </section>
+      <section>
+        <label>Rotate</label>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button
+            onClick={onStartRotation}
+            disabled={!hasFloater && !(selectionConfirmed && hasSelection)}
+            className={hasFloater && angle !== 0 ? 'primary' : undefined}
+            style={{ flex: 1 }}
+            title="Lift the selection so the rotation handle is ready to drag"
+          >
+            ↻ Rotate
+          </button>
+          <button
+            onClick={() => onRotateBy(-Math.PI / 2)}
+            disabled={!hasFloater && !(selectionConfirmed && hasSelection)}
+            style={{ flex: 1 }}
+            title="Rotate 90° counter-clockwise"
+          >
+            -90°
+          </button>
+          <button
+            onClick={() => onRotateBy(Math.PI / 2)}
+            disabled={!hasFloater && !(selectionConfirmed && hasSelection)}
+            style={{ flex: 1 }}
+            title="Rotate 90° clockwise"
+          >
+            +90°
+          </button>
+        </div>
+        <div style={{ display: 'flex', gap: 6, marginTop: 6, alignItems: 'center' }}>
+          <input
+            type="number"
+            value={Math.round((angle * 180) / Math.PI)}
+            onChange={(e) => {
+              const deg = Number(e.target.value) || 0;
+              onSetAngle((deg * Math.PI) / 180);
+            }}
+            disabled={!hasFloater && !(selectionConfirmed && hasSelection)}
+            style={{ width: 70, fontSize: 11 }}
+          />
+          <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>deg</span>
+          <button
+            onClick={onResetRotation}
+            disabled={angle === 0}
+            style={{ marginLeft: 'auto', fontSize: 11 }}
+          >
+            Reset
+          </button>
+        </div>
+        <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 4, lineHeight: 1.4 }}>
+          Drag the circle handle above the selection to rotate freely. Hold
+          shift while dragging to snap to 15°.
         </div>
       </section>
       <section>

@@ -88,7 +88,7 @@ export const DEFAULT_NORMALIZE: NormalizationOptions = {
 };
 
 export const DEFAULT_SLICE: SliceConfig = {
-  mode: 'grid',
+  mode: 'boxes',
   grid: { ...DEFAULT_GRID },
   guides: { verticals: [], horizontals: [] },
   boxes: { rects: [] },

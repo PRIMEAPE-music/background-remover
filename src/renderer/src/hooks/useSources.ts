@@ -26,10 +26,19 @@ export interface UseSourcesApi {
   setImage: (id: string, next: ImageData) => void;
   /** Partial meta update — merges. */
   updateMeta: (id: string, patch: Partial<SourceMeta>) => void;
-  pushHistory: (id: string, prev: ImageData) => void;
+  /**
+   * Push the previous image onto the undo stack. By default this also clears
+   * the redo stack — the standard "new edit invalidates redo" rule. Pass
+   * `{ keepFuture: true }` from a redo handler so subsequent redos still work.
+   */
+  pushHistory: (id: string, prev: ImageData, opts?: { keepFuture?: boolean }) => void;
   popHistory: (id: string) => ImageData | null;
   dropLastHistory: (id: string) => void;
   clearHistory: (id: string) => void;
+  /** Push the current image onto the redo stack — used by the undo handler. */
+  pushFuture: (id: string, image: ImageData) => void;
+  /** Pop the next image off the redo stack — used by the redo handler. */
+  popFuture: (id: string) => ImageData | null;
   getImage: (id: string | null) => ImageData | null;
   getRuntime: (id: string) => SourceRuntime | null;
   setLiftSnapshot: (id: string, snapshot: ImageData | null) => void;
@@ -57,28 +66,37 @@ export function useSources(): UseSourcesApi {
   };
 
   const trimGlobalHistory = useCallback(() => {
-    // Sweep: if total history bytes exceed the global ceiling, drop the
+    // Sweep: if total undo+redo bytes exceed the global ceiling, drop the
     // oldest entry from whichever source currently holds the most memory
-    // until under budget.
+    // until under budget. Both stacks count toward the budget — a long redo
+    // trail can grow just as large as undo and exhausts the same RAM.
     const runtimes = runtimeRef.current;
+    const stackBytes = (rt: SourceRuntime) => {
+      let b = 0;
+      for (const h of rt.history) b += h.data.byteLength;
+      for (const f of rt.future) b += f.data.byteLength;
+      return b;
+    };
     let bytes = 0;
-    for (const rt of runtimes.values()) {
-      for (const h of rt.history) bytes += h.data.byteLength;
-    }
+    for (const rt of runtimes.values()) bytes += stackBytes(rt);
     while (bytes > MAX_UNDO_BYTES_GLOBAL) {
       let victim: SourceRuntime | null = null;
       let victimBytes = 0;
       for (const rt of runtimes.values()) {
-        if (rt.history.length === 0) continue;
-        let rb = 0;
-        for (const h of rt.history) rb += h.data.byteLength;
+        if (rt.history.length === 0 && rt.future.length === 0) continue;
+        const rb = stackBytes(rt);
         if (rb > victimBytes) {
           victimBytes = rb;
           victim = rt;
         }
       }
-      if (!victim || victim.history.length === 0) break;
-      const dropped = victim.history.shift()!;
+      if (!victim) break;
+      // Prefer dropping from the redo trail first (less disruptive than losing
+      // an undo step), then from the oldest history entry.
+      let dropped: ImageData | undefined;
+      if (victim.future.length > 0) dropped = victim.future.shift();
+      else if (victim.history.length > 0) dropped = victim.history.shift();
+      if (!dropped) break;
       bytes -= dropped.data.byteLength;
     }
   }, []);
@@ -134,13 +152,23 @@ export function useSources(): UseSourcesApi {
   }, []);
 
   const pushHistory = useCallback(
-    (id: string, prev: ImageData) => {
+    (id: string, prev: ImageData, opts?: { keepFuture?: boolean }) => {
       const rt = runtimeRef.current.get(id);
       if (!rt) return;
       rt.history.push(prev);
       while (rt.history.length > MAX_UNDO_COUNT) rt.history.shift();
+      // Standard undo/redo: any new edit kills the redo trail. The redo
+      // handler bypasses this by passing keepFuture so its own popFuture +
+      // pushHistory pair doesn't immolate the rest of the stack.
+      if (!opts?.keepFuture) rt.future = [];
       trimGlobalHistory();
-      setSources((p) => p.map((s) => (s.id === id ? { ...s, historyLen: rt.history.length } : s)));
+      setSources((p) =>
+        p.map((s) =>
+          s.id === id
+            ? { ...s, historyLen: rt.history.length, futureLen: rt.future.length }
+            : s,
+        ),
+      );
     },
     [trimGlobalHistory],
   );
@@ -164,7 +192,30 @@ export function useSources(): UseSourcesApi {
     const rt = runtimeRef.current.get(id);
     if (!rt) return;
     rt.history = [];
-    setSources((p) => p.map((s) => (s.id === id ? { ...s, historyLen: 0 } : s)));
+    rt.future = [];
+    setSources((p) =>
+      p.map((s) => (s.id === id ? { ...s, historyLen: 0, futureLen: 0 } : s)),
+    );
+  }, []);
+
+  const pushFuture = useCallback(
+    (id: string, image: ImageData) => {
+      const rt = runtimeRef.current.get(id);
+      if (!rt) return;
+      rt.future.push(image);
+      while (rt.future.length > MAX_UNDO_COUNT) rt.future.shift();
+      trimGlobalHistory();
+      setSources((p) => p.map((s) => (s.id === id ? { ...s, futureLen: rt.future.length } : s)));
+    },
+    [trimGlobalHistory],
+  );
+
+  const popFuture = useCallback((id: string): ImageData | null => {
+    const rt = runtimeRef.current.get(id);
+    if (!rt || rt.future.length === 0) return null;
+    const next = rt.future.pop()!;
+    setSources((p) => p.map((s) => (s.id === id ? { ...s, futureLen: rt.future.length } : s)));
+    return next;
   }, []);
 
   const getImage = useCallback((id: string | null): ImageData | null => {
@@ -216,6 +267,8 @@ export function useSources(): UseSourcesApi {
     popHistory,
     dropLastHistory,
     clearHistory,
+    pushFuture,
+    popFuture,
     getImage,
     getRuntime,
     setLiftSnapshot,

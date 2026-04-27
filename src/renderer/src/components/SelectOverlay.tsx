@@ -19,12 +19,16 @@ export interface SelectOverlayProps {
   confirmed: boolean;
   /** Pixels lifted from source; null until first move. */
   floater: ImageData | null;
+  /** Current rotation angle in radians (clockwise, matching CSS rotate). */
+  angle: number;
   /** Emitted when user draws a new rect (rectangle tool) or the bbox of a lasso. */
   onDefine: (rect: Rect, polygon: Point[] | null) => void;
   /** Emitted to promote a pending (drawn) selection into a confirmed one. */
   onConfirm: () => void;
   /** Emitted on each move step. `ensureLifted` must be true on the first move after define. */
   onMove: (nextOffset: { x: number; y: number }, ensureLifted: boolean, copy: boolean) => void;
+  /** Emitted while the rotation handle is dragged. */
+  onRotate: (angleRad: number) => void;
   /** Called to finalize: paste floater into image and clear selection. */
   onCommit: () => void;
   /** Called to abort: restore pre-lift image and clear selection. */
@@ -33,7 +37,7 @@ export interface SelectOverlayProps {
   onEraseFloater: () => void;
 }
 
-type DragMode = 'none' | 'define' | 'lasso' | 'move';
+type DragMode = 'none' | 'define' | 'lasso' | 'move' | 'rotate';
 
 export function SelectOverlay({
   imageWidth,
@@ -45,9 +49,11 @@ export function SelectOverlay({
   offset,
   confirmed,
   floater,
+  angle,
   onDefine,
   onConfirm,
   onMove,
+  onRotate,
   onCommit,
   onCancel,
   onEraseFloater,
@@ -55,6 +61,12 @@ export function SelectOverlay({
   const containerRef = useRef<HTMLDivElement>(null);
   const dragMode = useRef<DragMode>('none');
   const dragStart = useRef({ x: 0, y: 0, origOx: 0, origOy: 0, copy: false });
+  // Rotation drag bookkeeping: where the cursor was relative to the box center
+  // when the handle was grabbed, plus the angle at that moment. We compute the
+  // new angle as (currentCursorAngle - grabCursorAngle) + initialBoxAngle so
+  // the handle "follows" the cursor without snapping on grab.
+  const rotateStart = useRef({ centerX: 0, centerY: 0, grabAngle: 0, initialBoxAngle: 0 });
+  const ROTATE_SNAP = Math.PI / 12; // 15°
   // Local drag offset — updated on every mousemove so the marquee/floater
   // follows the cursor smoothly without triggering the heavy lift each frame.
   // The actual lift + image state change only happens on mouseup.
@@ -72,11 +84,19 @@ export function SelectOverlay({
 
   const insideSelection = (x: number, y: number): boolean => {
     if (!selectionRect || !displayOffset) return false;
+    // Inverse-rotate the cursor around the box center so the hit test works
+    // regardless of `angle`. When angle is 0 this collapses to the original
+    // axis-aligned check.
+    const cx = displayOffset.x + selectionRect.width / 2;
+    const cy = displayOffset.y + selectionRect.height / 2;
+    const cosA = Math.cos(-angle);
+    const sinA = Math.sin(-angle);
+    const dx = x - cx;
+    const dy = y - cy;
+    const lx = dx * cosA - dy * sinA;
+    const ly = dx * sinA + dy * cosA;
     return (
-      x >= displayOffset.x &&
-      y >= displayOffset.y &&
-      x < displayOffset.x + selectionRect.width &&
-      y < displayOffset.y + selectionRect.height
+      Math.abs(lx) < selectionRect.width / 2 && Math.abs(ly) < selectionRect.height / 2
     );
   };
 
@@ -137,6 +157,12 @@ export function SelectOverlay({
         x: Math.round(dragStart.current.origOx + (p.x - dragStart.current.x)),
         y: Math.round(dragStart.current.origOy + (p.y - dragStart.current.y)),
       });
+    } else if (dragMode.current === 'rotate') {
+      const rs = rotateStart.current;
+      const cur = Math.atan2(p.y - rs.centerY, p.x - rs.centerX);
+      let next = rs.initialBoxAngle + (cur - rs.grabAngle);
+      if (e.shiftKey) next = Math.round(next / ROTATE_SNAP) * ROTATE_SNAP;
+      onRotate(next);
     }
   };
 
@@ -156,6 +182,23 @@ export function SelectOverlay({
     setDragOffset(null);
     setLassoDraft(null);
     dragMode.current = 'none';
+  };
+
+  const onRotateHandleDown = (e: React.MouseEvent) => {
+    if (e.button !== 0) return;
+    if (!selectionRect || !displayOffset) return;
+    e.stopPropagation();
+    e.preventDefault();
+    const p = toLocal(e);
+    const cx = displayOffset.x + selectionRect.width / 2;
+    const cy = displayOffset.y + selectionRect.height / 2;
+    rotateStart.current = {
+      centerX: cx,
+      centerY: cy,
+      grabAngle: Math.atan2(p.y - cy, p.x - cx),
+      initialBoxAngle: angle,
+    };
+    dragMode.current = 'rotate';
   };
 
   useEffect(() => {
@@ -216,9 +259,9 @@ export function SelectOverlay({
       ? 'rgba(255,106,106,0.06)'
       : 'rgba(240,200,74,0.08)';
   const hintText = hasFloat
-    ? 'drag: move · arrows: nudge · enter: commit · esc: revert · del: erase'
+    ? 'drag: move · handle: rotate · arrows: nudge · enter: commit · esc: revert · del: erase'
     : confirmed
-      ? 'drag-in-box: move · arrows: nudge · enter: commit · esc: cancel · drag-outside: redraw'
+      ? 'drag-in-box: move · handle: rotate · arrows: nudge · enter: commit · esc: cancel · drag-outside: redraw'
       : tool === 'lasso'
         ? 'drag: trace a lasso · enter or "Confirm selection" when ready'
         : 'drag: draw selection · enter or "Confirm selection" when ready';
@@ -227,6 +270,11 @@ export function SelectOverlay({
     dragMode.current === 'lasso' ? lassoDraft : !hasFloat ? lassoPolygon : null;
   const polyOffsetDx = displayOffset && selectionRect ? displayOffset.x - selectionRect.x : 0;
   const polyOffsetDy = displayOffset && selectionRect ? displayOffset.y - selectionRect.y : 0;
+  const showRotateHandle = !!selectionRect && !!displayOffset && (hasFloat || confirmed);
+  // Visual size of the rotation handle and its connector, in image coords —
+  // divide by zoom so the apparent size stays constant across zoom levels.
+  const handleR = 7 / zoom;
+  const handleGap = 24 / zoom;
 
   return (
     <div
@@ -245,9 +293,6 @@ export function SelectOverlay({
       onMouseUp={onMouseUp}
       onMouseLeave={onMouseUp}
     >
-      {floater && displayOffset && (
-        <FloaterImage data={floater} x={displayOffset.x} y={displayOffset.y} />
-      )}
       {selectionRect && displayOffset && (
         <div
           style={{
@@ -256,12 +301,61 @@ export function SelectOverlay({
             top: displayOffset.y,
             width: selectionRect.width,
             height: selectionRect.height,
-            border: `${strokeW}px dashed ${color}`,
-            boxSizing: 'border-box',
-            background: lassoPolygon ? 'transparent' : bg,
+            transformOrigin: '50% 50%',
+            transform: `rotate(${angle}rad)`,
             pointerEvents: 'none',
           }}
-        />
+        >
+          {floater && <FloaterImage data={floater} x={0} y={0} />}
+          <div
+            style={{
+              position: 'absolute',
+              left: 0,
+              top: 0,
+              width: '100%',
+              height: '100%',
+              border: `${strokeW}px dashed ${color}`,
+              boxSizing: 'border-box',
+              background: lassoPolygon ? 'transparent' : bg,
+              pointerEvents: 'none',
+            }}
+          />
+          {showRotateHandle && (
+            <>
+              {/* Connector line from box top-center to the rotation handle. */}
+              <div
+                style={{
+                  position: 'absolute',
+                  left: '50%',
+                  top: -handleGap,
+                  width: 0,
+                  height: handleGap,
+                  marginLeft: -strokeW / 2,
+                  borderLeft: `${strokeW}px solid ${color}`,
+                  pointerEvents: 'none',
+                }}
+              />
+              <div
+                onMouseDown={onRotateHandleDown}
+                title="Drag to rotate · hold shift to snap to 15°"
+                style={{
+                  position: 'absolute',
+                  left: '50%',
+                  top: -handleGap - handleR,
+                  width: handleR * 2,
+                  height: handleR * 2,
+                  marginLeft: -handleR,
+                  borderRadius: '50%',
+                  background: color,
+                  border: `${strokeW}px solid #1e1e22`,
+                  cursor: 'grab',
+                  pointerEvents: 'auto',
+                  boxSizing: 'border-box',
+                }}
+              />
+            </>
+          )}
+        </div>
       )}
       {polyToShow && polyToShow.length >= 2 && (
         <svg

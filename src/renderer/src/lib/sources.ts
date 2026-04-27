@@ -8,6 +8,12 @@ import type { Point } from './lasso';
 export interface SourceRuntime {
   image: ImageData;
   history: ImageData[];
+  /**
+   * Redo stack — populated when an edit is undone, drained when redone, and
+   * cleared whenever a fresh edit happens (the standard undo/redo invalidation
+   * rule, enforced inside `pushHistory`).
+   */
+  future: ImageData[];
   liftSnapshot: ImageData | null;
   floater: ImageData | null;
 }
@@ -24,6 +30,7 @@ export interface SourceMeta {
   height: number;
   version: number;
   historyLen: number;
+  futureLen: number;
   slice: SliceConfig;
   selectedCellIndex: number | null;
   selectionRect: Rect | null;
@@ -49,6 +56,7 @@ export function makeSourceMeta(params: {
     height: params.image.height,
     version: params.version,
     historyLen: 0,
+    futureLen: 0,
     slice: { ...DEFAULT_SLICE, overrides: {} },
     selectedCellIndex: null,
     selectionRect: null,
@@ -64,6 +72,7 @@ export function makeSourceRuntime(image: ImageData): SourceRuntime {
   return {
     image,
     history: [],
+    future: [],
     liftSnapshot: null,
     floater: null,
   };

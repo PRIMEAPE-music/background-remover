@@ -25,6 +25,8 @@ export interface SliceSidebarProps {
   onExportCells: () => void;
   onExportAtlas: () => void;
   onAutoDetectBlobs: (mergeGap: number) => void;
+  onAutoDetectBlobsAllSources: (mergeGap: number) => void;
+  sourceCount: number;
   onAutoRepack: () => void;
   boxesTool: BoxesTool;
   onBoxesToolChange: (t: BoxesTool) => void;
@@ -56,6 +58,8 @@ export function SliceSidebar(props: SliceSidebarProps) {
     onExportCells,
     onExportAtlas,
     onAutoDetectBlobs,
+    onAutoDetectBlobsAllSources,
+    sourceCount,
     onAutoRepack,
     boxesTool,
     onBoxesToolChange,
@@ -131,6 +135,8 @@ export function SliceSidebar(props: SliceSidebarProps) {
           imageWidth={imageWidth}
           imageHeight={imageHeight}
           onAutoDetectBlobs={onAutoDetectBlobs}
+          onAutoDetectBlobsAllSources={onAutoDetectBlobsAllSources}
+          sourceCount={sourceCount}
           tool={boxesTool}
           onToolChange={onBoxesToolChange}
         />
@@ -409,6 +415,8 @@ function BoxesControls({
   imageWidth,
   imageHeight,
   onAutoDetectBlobs,
+  onAutoDetectBlobsAllSources,
+  sourceCount,
   tool,
   onToolChange,
 }: {
@@ -418,6 +426,8 @@ function BoxesControls({
   imageWidth: number;
   imageHeight: number;
   onAutoDetectBlobs: (mergeGap: number) => void;
+  onAutoDetectBlobsAllSources: (mergeGap: number) => void;
+  sourceCount: number;
   tool: BoxesTool;
   onToolChange: (t: BoxesTool) => void;
 }) {
@@ -446,6 +456,18 @@ function BoxesControls({
       <section>
         <button onClick={() => onAutoDetectBlobs(mergeGap)} className="primary" style={{ width: '100%' }}>
           Auto-detect sprite blobs
+        </button>
+        <button
+          onClick={() => onAutoDetectBlobsAllSources(mergeGap)}
+          disabled={sourceCount < 2}
+          style={{ width: '100%', marginTop: 4 }}
+          title={
+            sourceCount < 2
+              ? 'Load more than one source to batch-detect'
+              : 'Run blob detection on every loaded sheet'
+          }
+        >
+          Auto-detect across all {sourceCount} sources
         </button>
         <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 6, fontSize: 11 }}>
           <span style={{ flex: 1 }}>Merge gap</span>

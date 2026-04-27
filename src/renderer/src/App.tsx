@@ -754,6 +754,24 @@ export function App() {
     [activeId, active, getSourceImage, updateMeta],
   );
 
+  const autoDetectBlobsAllSources = useCallback(
+    async (mergeGap: number) => {
+      // Each source's blob scan is a synchronous main-thread block; yield
+      // between sources so the toolbar/progress can paint between sheets.
+      for (const s of sourcesList) {
+        const img = getSourceImage(s.id);
+        if (!img) continue;
+        await new Promise<void>((r) => requestAnimationFrame(() => r()));
+        const rects = detectBlobs(img, 16, 1, 0, mergeGap);
+        updateMeta(s.id, {
+          slice: { ...s.slice, mode: 'boxes', boxes: { rects } },
+          selectedCellIndex: null,
+        });
+      }
+    },
+    [sourcesList, getSourceImage, updateMeta],
+  );
+
   const handleSavePreset = useCallback(
     (name: string) => {
       if (!active) return;
@@ -1398,6 +1416,8 @@ export function App() {
             onExportCells={exportCells}
             onExportAtlas={exportAtlas}
             onAutoDetectBlobs={autoDetectBlobs}
+            onAutoDetectBlobsAllSources={autoDetectBlobsAllSources}
+            sourceCount={sourcesList.length}
             onAutoRepack={autoRepack}
             boxesTool={boxesTool}
             onBoxesToolChange={setBoxesTool}

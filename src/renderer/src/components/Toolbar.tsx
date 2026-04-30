@@ -1,4 +1,4 @@
-export type ViewMode = 'remove' | 'select' | 'slice' | 'builder' | 'generate';
+export type ViewMode = 'remove' | 'select' | 'slice' | 'builder' | 'generate' | 'test';
 
 export interface ToolbarProps {
   filename: string | null;
@@ -30,18 +30,20 @@ export function Toolbar({ filename, hasImage, mode, onModeChange, onOpen, onSave
       <div style={{ width: 1, height: 22, background: 'var(--border)', margin: '0 6px' }} />
 
       <div style={{ display: 'flex', gap: 4 }}>
-        {(['remove', 'select', 'slice', 'builder', 'generate'] as const).map((m) => (
+        {(['remove', 'select', 'slice', 'builder', 'generate', 'test'] as const).map((m) => {
+          const alwaysReachable = m === 'builder' || m === 'generate' || m === 'test';
+          return (
           <button
             key={m}
             className={mode === m ? 'primary' : ''}
             onClick={() => onModeChange(m)}
             style={{ textTransform: 'capitalize' }}
-            // Builder + Generate are always reachable: Builder loads saved
-            // projects without a sheet, and Generate produces images from
-            // scratch. The three editing modes still gate on an active source.
-            disabled={m !== 'builder' && m !== 'generate' && !hasImage}
+            // Builder, Generate and Test are always reachable: Builder/Test
+            // operate on the loaded project's animations without needing an
+            // active sheet, and Generate produces images from scratch.
+            disabled={!alwaysReachable && !hasImage}
             title={
-              m !== 'builder' && m !== 'generate' && !hasImage
+              !alwaysReachable && !hasImage
                 ? 'Load a sheet first (drop one or click "Open image…")'
                 : undefined
             }
@@ -54,9 +56,12 @@ export function Toolbar({ filename, hasImage, mode, onModeChange, onOpen, onSave
                   ? 'Slice'
                   : m === 'builder'
                     ? 'Builder'
-                    : 'Generate'}
+                    : m === 'generate'
+                      ? 'Generate'
+                      : 'Test'}
           </button>
-        ))}
+          );
+        })}
       </div>
 
       <div

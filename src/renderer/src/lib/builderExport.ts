@@ -83,6 +83,77 @@ export async function composeAnimationStrip(
 }
 
 /**
+ * Render an animation to per-frame ImageData (one entry per slot, each at
+ * `boxSize.w × boxSize.h`). Returns null if the animation isn't ready.
+ *
+ * Used by Test mode for fast playback — frames are pre-rendered once on
+ * tab entry and `putImageData` per tick avoids any per-frame composition.
+ * Mirrors the layout decisions of `composeAnimationStrip` so what you test
+ * matches what you export.
+ */
+export async function composeAnimationFrames(
+  animation: Animation,
+  builder: BuilderState,
+  sources: SourceMeta[],
+  getSource: (id: string | null) => ImageData | null,
+): Promise<ImageData[] | null> {
+  const { boxSize, anchor, scaleRef } = builder;
+  if (!scaleRef) return null;
+  const slots = animation.slots;
+  if (slots.length === 0 || !slots.every((s) => s.cell)) return null;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = boxSize.w;
+  canvas.height = boxSize.h;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+  ctx.imageSmoothingEnabled = false;
+
+  const frames: ImageData[] = [];
+  for (let i = 0; i < slots.length; i++) {
+    const slot = slots[i];
+    if (!slot.cell) return null;
+    ctx.clearRect(0, 0, boxSize.w, boxSize.h);
+    const source = sources.find((s) => s.id === slot.cell!.sourceId);
+    if (!source) return null;
+    const img = getSource(source.id);
+    if (!img) return null;
+    const srcCells = computeCells(source.slice, source.width, source.height);
+    const rect = srcCells[slot.cell.cellIndex];
+    if (!rect) return null;
+    const bounds = contentBoundsInRect(img, rect);
+    if (!bounds) return null;
+    const ratio = slotScale(scaleRef, slot);
+    const drawW = Math.max(1, Math.round(bounds.width * ratio));
+    const drawH = Math.max(1, Math.round(bounds.height * ratio));
+    const { dx, dy } = computeAnchorPos(anchor, boxSize, drawW, drawH, slot.yOffset);
+    const bitmap = await createImageBitmap(
+      img,
+      rect.x + bounds.x,
+      rect.y + bounds.y,
+      bounds.width,
+      bounds.height,
+      { resizeWidth: drawW, resizeHeight: drawH, resizeQuality: 'low' },
+    );
+    const override = source.slice.overrides[slot.cell.cellIndex] ?? {};
+    const flipH = !!override.flipH;
+    const flipV = !!override.flipV;
+    if (flipH || flipV) {
+      ctx.save();
+      ctx.translate(dx + drawW / 2, dy + drawH / 2);
+      ctx.scale(flipH ? -1 : 1, flipV ? -1 : 1);
+      ctx.drawImage(bitmap, -drawW / 2, -drawH / 2);
+      ctx.restore();
+    } else {
+      ctx.drawImage(bitmap, dx, dy);
+    }
+    bitmap.close();
+    frames.push(ctx.getImageData(0, 0, boxSize.w, boxSize.h));
+  }
+  return frames;
+}
+
+/**
  * Filename for an exported strip — `<sanitized-name>_<fps>fps`. The fps
  * suffix lets the engine integrator know the playback rate the strip was
  * authored at without opening the project.

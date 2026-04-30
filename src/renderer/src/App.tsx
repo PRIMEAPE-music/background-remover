@@ -11,6 +11,7 @@ import { SourcesSidebar } from './components/SourcesSidebar';
 import { BuilderView, type SelectedCell } from './components/BuilderView';
 import { BuilderSidebar } from './components/BuilderSidebar';
 import { GeneratePage } from './components/GeneratePage';
+import { TestPage } from './components/TestPage';
 import {
   DEFAULT_BUILDER,
   getActiveAnimation,
@@ -1377,6 +1378,13 @@ export function App() {
         />
         {mode === 'generate' ? (
           <GeneratePage projectFolder={projectFolder} />
+        ) : mode === 'test' ? (
+          <TestPage
+            builder={builder}
+            onBuilderChange={setBuilder}
+            sources={sourcesList}
+            getSource={getSourceImage}
+          />
         ) : mode === 'builder' ? (
           <>
             <BuilderView

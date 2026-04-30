@@ -45,6 +45,18 @@ export interface Animation {
    * to play it at.
    */
   fps: number;
+  /**
+   * Keys (KeyboardEvent.code values, e.g. "KeyW", "ArrowUp", "Space") that
+   * trigger this animation in the Test mode. Multi-key supported. Stored
+   * here so they survive project save/load alongside slots and fps.
+   */
+  testKeys?: string[];
+  /**
+   * When true, holding a bound key keeps the animation looping. When false,
+   * pressing a bound key plays the animation once and the player returns to
+   * the default (idle) animation. Default = true.
+   */
+  testLoop?: boolean;
 }
 
 export const DEFAULT_FPS = 8;
@@ -68,6 +80,11 @@ export interface BuilderState {
   collapsedSources: string[];
   /** When true, the gallery sorts source rows alphabetically by filename. */
   gallerySortByName: boolean;
+  /**
+   * Animation that plays in Test mode when no bound key is held. Defaults
+   * to the first animation if unset. Persisted with the project.
+   */
+  testDefaultAnimationId?: string | null;
 }
 
 export const DEFAULT_BUILDER: BuilderState = {
@@ -88,7 +105,14 @@ export function newAnimationId(): string {
 }
 
 export function newAnimation(name: string, slotCount = 8): Animation {
-  return { id: newAnimationId(), name, slots: emptySlots(slotCount), fps: DEFAULT_FPS };
+  return {
+    id: newAnimationId(),
+    name,
+    slots: emptySlots(slotCount),
+    fps: DEFAULT_FPS,
+    testKeys: [],
+    testLoop: true,
+  };
 }
 
 export function emptySlots(count: number): Slot[] {
@@ -114,7 +138,7 @@ export function getActiveAnimation(state: BuilderState): Animation | null {
 /** Replace fields on the active animation and return a new state. Noop if none active. */
 export function updateActiveAnimation(
   state: BuilderState,
-  patch: Partial<Pick<Animation, 'name' | 'slots' | 'fps'>>,
+  patch: Partial<Pick<Animation, 'name' | 'slots' | 'fps' | 'testKeys' | 'testLoop'>>,
 ): BuilderState {
   if (!state.activeAnimationId) return state;
   return {
@@ -135,11 +159,21 @@ export function migrateBuilderState(raw: unknown): BuilderState {
   if (!raw || typeof raw !== 'object') return DEFAULT_BUILDER;
   const obj = raw as Record<string, unknown>;
   if (Array.isArray(obj.animations)) {
-    // Already new-ish shape — backfill fps for animations saved before that field existed.
+    // Already new-ish shape — backfill fps + test fields on animations saved
+    // before those existed.
     const animations = (obj.animations as Animation[]).map((a) => ({
       ...a,
       fps: typeof a.fps === 'number' && a.fps > 0 ? a.fps : DEFAULT_FPS,
+      testKeys: Array.isArray(a.testKeys)
+        ? a.testKeys.filter((k) => typeof k === 'string')
+        : [],
+      testLoop: typeof a.testLoop === 'boolean' ? a.testLoop : true,
     }));
+    const testDefaultRaw =
+      typeof obj.testDefaultAnimationId === 'string' ? obj.testDefaultAnimationId : null;
+    const testDefault = testDefaultRaw && animations.some((a) => a.id === testDefaultRaw)
+      ? testDefaultRaw
+      : null;
     return {
       boxSize: (obj.boxSize as BuilderState['boxSize']) ?? DEFAULT_BUILDER.boxSize,
       anchor: (obj.anchor as BuilderState['anchor']) ?? DEFAULT_BUILDER.anchor,
@@ -153,6 +187,7 @@ export function migrateBuilderState(raw: unknown): BuilderState {
         : [],
       gallerySortByName:
         typeof obj.gallerySortByName === 'boolean' ? obj.gallerySortByName : false,
+      testDefaultAnimationId: testDefault,
     };
   }
   // Old shape: top-level slots + animationName

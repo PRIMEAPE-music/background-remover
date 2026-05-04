@@ -23,6 +23,9 @@ export interface SliceSidebarProps {
   selectedCellIndex: number | null;
   onSelectedCellIndexChange: (i: number | null) => void;
   onExportCells: () => void;
+  /** Raw export: one PNG per cell at its natural bounding-box size. No
+   *  normalization, no flip overrides, no padding, no trim. */
+  onExportRawCells: () => void;
   onExportAtlas: () => void;
   onAutoDetectBlobs: (mergeGap: number) => void;
   onAutoDetectBlobsAllSources: (mergeGap: number) => void;
@@ -56,6 +59,7 @@ export function SliceSidebar(props: SliceSidebarProps) {
     selectedCellIndex,
     onSelectedCellIndexChange,
     onExportCells,
+    onExportRawCells,
     onExportAtlas,
     onAutoDetectBlobs,
     onAutoDetectBlobsAllSources,
@@ -203,6 +207,14 @@ export function SliceSidebar(props: SliceSidebarProps) {
           <button className="primary" onClick={onExportCells} disabled={!canExport}>
             Export cells (individual PNGs)…
           </button>
+          <button onClick={onExportRawCells} disabled={!canExport}>
+            Export raw blobs (full-size, no normalize)…
+          </button>
+          <div style={{ fontSize: 10, color: 'var(--text-dim)', lineHeight: 1.4 }}>
+            Raw = one PNG per cell at its exact bounding-box size. No padding,
+            trim, scaling, or flip applied. Filenames suffixed with{' '}
+            <code>_raw_NN</code> so they don't collide with the normalized export.
+          </div>
           <button className="primary" onClick={onExportAtlas} disabled={!canExport}>
             Export Phaser 3 atlas (PNG + JSON)…
           </button>

@@ -1,4 +1,4 @@
-import { memo, useEffect, useState } from 'react';
+import { memo, useEffect, useMemo, useState } from 'react';
 import {
   DEFAULT_FPS,
   getActiveAnimation,
@@ -6,6 +6,7 @@ import {
   type BuilderState,
 } from '../lib/builder';
 import type { SourceMeta } from '../lib/sources';
+import { PhaserParticleOverlay } from './builder/particles/PhaserParticleOverlay';
 import { SlotRenderer } from './SlotRenderer';
 
 export interface BuilderPreviewProps {
@@ -13,24 +14,53 @@ export interface BuilderPreviewProps {
   onStateChange: (s: BuilderState) => void;
   sources: SourceMeta[];
   getSource: (id: string | null) => ImageData | null;
+  /**
+   * When true, the preview is always mounted with no Show/Hide toggle. Used by
+   * the dock's pinned preview column where the preview is the whole point of
+   * the column. Default `false` preserves the original opt-in behavior so any
+   * caller that mounts this inside a tall scrollable panel can still defer the
+   * (mildly expensive) ImageData reads until the user asks.
+   */
+  alwaysOn?: boolean;
 }
 
 /**
- * Opt-in animated preview of the current builder strip. Mounted only when
- * the user clicks "Show preview" — same pattern as Slice mode's preview, for
- * the same reason: keeping a live ImageData reference in the sidebar's prop
- * tree causes React 19 dev-mode reconciliation stalls during rapid source
- * switches.
+ * Animated preview of the current builder strip. Two modes:
+ *  - `alwaysOn`: mount immediately. Used by the pinned dock preview.
+ *  - default: opt-in via Show/Hide. Same pattern as Slice mode's preview, for
+ *    the same reason — keeping a live ImageData reference in the prop tree
+ *    causes React 19 dev-mode reconciliation stalls during rapid source
+ *    switches.
  */
 export const BuilderPreview = memo(function BuilderPreview({
   state,
   onStateChange,
   sources,
   getSource,
+  alwaysOn = false,
 }: BuilderPreviewProps) {
-  const [enabled, setEnabled] = useState(false);
+  const [enabled, setEnabled] = useState(alwaysOn);
   const active = getActiveAnimation(state);
   const canPreview = !!active && active.slots.some((s) => s.cell);
+  if (alwaysOn) {
+    return (
+      <section>
+        <label>Animation preview</label>
+        {canPreview ? (
+          <PreviewInner
+            state={state}
+            onStateChange={onStateChange}
+            sources={sources}
+            getSource={getSource}
+          />
+        ) : (
+          <div style={{ fontSize: 11, color: 'var(--text-dim)', lineHeight: 1.4 }}>
+            Place at least one sprite into a slot to see the preview.
+          </div>
+        )}
+      </section>
+    );
+  }
   return (
     <section>
       <label>Animation preview</label>
@@ -103,6 +133,31 @@ function PreviewInner({
   const displayW = Math.round(state.boxSize.w * scale);
   const displayH = Math.round(state.boxSize.h * scale);
 
+  // Split emitters by layer so we can stack them around the sprite. useMemo
+  // keeps array refs stable across renders that don't actually change the
+  // emitter list, which lets PhaserParticleOverlay's debounce see no change.
+  const allEmitters = active?.emitters ?? [];
+  const backEmitters = useMemo(
+    () => allEmitters.filter((e) => e.layer === 'back'),
+    [allEmitters],
+  );
+  const frontEmitters = useMemo(
+    () => allEmitters.filter((e) => e.layer === 'front'),
+    [allEmitters],
+  );
+
+  // Common transform for all three layers: scale logical-pixel content down
+  // to displayW × displayH from the box's logical size.
+  const layerStyle: React.CSSProperties = {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    width: state.boxSize.w,
+    height: state.boxSize.h,
+    transform: `scale(${scale})`,
+    transformOrigin: '0 0',
+  };
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
       <div
@@ -117,15 +172,19 @@ function PreviewInner({
           position: 'relative',
         }}
       >
+        <div style={layerStyle}>
+          <PhaserParticleOverlay
+            width={state.boxSize.w}
+            height={state.boxSize.h}
+            anchor={state.anchor}
+            emitters={backEmitters}
+            frameIndex={index}
+            sources={sources}
+            getSource={getSource}
+          />
+        </div>
         {slot ? (
-          <div
-            style={{
-              transform: `scale(${scale})`,
-              transformOrigin: '0 0',
-              width: state.boxSize.w,
-              height: state.boxSize.h,
-            }}
-          >
+          <div style={layerStyle}>
             <SlotRenderer
               slot={slot}
               boxSize={state.boxSize}
@@ -136,6 +195,17 @@ function PreviewInner({
             />
           </div>
         ) : null}
+        <div style={layerStyle}>
+          <PhaserParticleOverlay
+            width={state.boxSize.w}
+            height={state.boxSize.h}
+            anchor={state.anchor}
+            emitters={frontEmitters}
+            frameIndex={index}
+            sources={sources}
+            getSource={getSource}
+          />
+        </div>
       </div>
       <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
         <button onClick={() => setPlaying((p) => !p)} disabled={slots.length === 0}>

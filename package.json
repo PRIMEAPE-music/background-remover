@@ -12,8 +12,13 @@
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json"
   },
   "dependencies": {
+    "@tensorflow/tfjs": "^4.11.0",
+    "@upscalerjs/default-model": "^1.0.0",
+    "@upscalerjs/esrgan-thick": "^1.0.0",
+    "phaser": "^3.90.0",
     "react": "^19.2.0",
-    "react-dom": "^19.2.0"
+    "react-dom": "^19.2.0",
+    "upscaler": "^1.0.0"
   },
   "devDependencies": {
     "@types/node": "^24.10.1",

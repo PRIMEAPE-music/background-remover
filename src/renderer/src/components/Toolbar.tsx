@@ -1,4 +1,11 @@
-export type ViewMode = 'remove' | 'select' | 'slice' | 'builder' | 'generate' | 'test';
+export type ViewMode =
+  | 'remove'
+  | 'select'
+  | 'slice'
+  | 'builder'
+  | 'platforms'
+  | 'generate'
+  | 'test';
 
 export interface ToolbarProps {
   filename: string | null;
@@ -30,36 +37,40 @@ export function Toolbar({ filename, hasImage, mode, onModeChange, onOpen, onSave
       <div style={{ width: 1, height: 22, background: 'var(--border)', margin: '0 6px' }} />
 
       <div style={{ display: 'flex', gap: 4 }}>
-        {(['remove', 'select', 'slice', 'builder', 'generate', 'test'] as const).map((m) => {
-          const alwaysReachable = m === 'builder' || m === 'generate' || m === 'test';
+        {(['remove', 'select', 'slice', 'builder', 'platforms', 'generate', 'test'] as const).map((m) => {
+          // Builder, Platforms, Generate and Test are always reachable. Builder
+          // and Test operate on the loaded project's animations without needing
+          // an active sheet; Platforms has its own asset library independent
+          // of any source sheet; Generate produces images from scratch.
+          const alwaysReachable =
+            m === 'builder' || m === 'platforms' || m === 'generate' || m === 'test';
           return (
-          <button
-            key={m}
-            className={mode === m ? 'primary' : ''}
-            onClick={() => onModeChange(m)}
-            style={{ textTransform: 'capitalize' }}
-            // Builder, Generate and Test are always reachable: Builder/Test
-            // operate on the loaded project's animations without needing an
-            // active sheet, and Generate produces images from scratch.
-            disabled={!alwaysReachable && !hasImage}
-            title={
-              !alwaysReachable && !hasImage
-                ? 'Load a sheet first (drop one or click "Open image…")'
-                : undefined
-            }
-          >
-            {m === 'remove'
-              ? 'Color'
-              : m === 'select'
-                ? 'Transform'
-                : m === 'slice'
-                  ? 'Slice'
-                  : m === 'builder'
-                    ? 'Builder'
-                    : m === 'generate'
-                      ? 'Generate'
-                      : 'Test'}
-          </button>
+            <button
+              key={m}
+              className={mode === m ? 'primary' : ''}
+              onClick={() => onModeChange(m)}
+              style={{ textTransform: 'capitalize' }}
+              disabled={!alwaysReachable && !hasImage}
+              title={
+                !alwaysReachable && !hasImage
+                  ? 'Load a sheet first (drop one or click "Open image…")'
+                  : undefined
+              }
+            >
+              {m === 'remove'
+                ? 'Color'
+                : m === 'select'
+                  ? 'Transform'
+                  : m === 'slice'
+                    ? 'Slice'
+                    : m === 'builder'
+                      ? 'Builder'
+                      : m === 'platforms'
+                        ? 'Platforms'
+                        : m === 'generate'
+                          ? 'Generate'
+                          : 'Test'}
+            </button>
           );
         })}
       </div>

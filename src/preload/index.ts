@@ -21,6 +21,11 @@ const api = {
   openImages: (): Promise<OpenedImage[]> => ipcRenderer.invoke('dialog:openImage'),
   openImagePaths: (): Promise<string[]> => ipcRenderer.invoke('dialog:openImagePaths'),
   openFolder: (): Promise<string | null> => ipcRenderer.invoke('dialog:openFolder'),
+  openSpecificFile: (opts: {
+    title?: string;
+    extensions: string[];
+    filterName: string;
+  }): Promise<string | null> => ipcRenderer.invoke('dialog:openSpecificFile', opts),
   saveImage: (defaultName: string, buffer: ArrayBuffer): Promise<string | null> =>
     ipcRenderer.invoke('dialog:saveImage', defaultName, buffer),
   listImages: (folderPath: string): Promise<string[]> =>
@@ -33,6 +38,9 @@ const api = {
   renameFile: (from: string, to: string): Promise<string> =>
     ipcRenderer.invoke('fs:rename', from, to),
   unlinkFile: (filePath: string): Promise<string> => ipcRenderer.invoke('fs:unlink', filePath),
+  getUserDataPath: (): Promise<string> => ipcRenderer.invoke('app:getUserDataPath'),
+  listDir: (dirPath: string): Promise<string[]> => ipcRenderer.invoke('fs:listDir', dirPath),
+  pathExists: (p: string): Promise<boolean> => ipcRenderer.invoke('fs:pathExists', p),
 
   // Gemini
   geminiSaveKey: (key: string): Promise<boolean> => ipcRenderer.invoke('gemini:saveKey', key),

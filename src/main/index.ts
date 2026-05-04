@@ -2,6 +2,13 @@ import { app, BrowserWindow, ipcMain, dialog } from 'electron';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { readFile, writeFile, readdir, stat, mkdir, rename, unlink } from 'node:fs/promises';
+
+// Bump the renderer's V8 old-space cap so the AI upscaler can process a
+// library of high-res sprites without hitting OOM. Default is ~4GB on
+// 64-bit; 8GB gives plenty of headroom for 16× ImageData buffers in
+// flight without stressing modest dev machines. Must be set BEFORE
+// app.ready, otherwise it's ignored.
+app.commandLine.appendSwitch('js-flags', '--max-old-space-size=8192');
 import {
   generateImage,
   saveApiKey,
@@ -94,6 +101,23 @@ ipcMain.handle('dialog:openFolder', async () => {
   return result.filePaths[0];
 });
 
+// File picker scoped to a specific filename. The `name` arg is just a label
+// shown in the dialog; the actual filter pins the extension (e.g. JSON).
+// Used so the user can open a project by pointing at its `platforms.json`
+// directly — works even when the surrounding folder has been renamed.
+ipcMain.handle(
+  'dialog:openSpecificFile',
+  async (_, opts: { title?: string; extensions: string[]; filterName: string }) => {
+    const result = await dialog.showOpenDialog({
+      title: opts.title ?? 'Select file',
+      properties: ['openFile'],
+      filters: [{ name: opts.filterName, extensions: opts.extensions }],
+    });
+    if (result.canceled || result.filePaths.length === 0) return null;
+    return result.filePaths[0];
+  },
+);
+
 ipcMain.handle('dialog:saveImage', async (_, defaultName: string, buffer: ArrayBuffer) => {
   const result = await dialog.showSaveDialog({
     title: 'Save image',
@@ -140,6 +164,34 @@ ipcMain.handle('fs:rename', async (_, from: string, to: string) => {
 ipcMain.handle('fs:unlink', async (_, filePath: string) => {
   await unlink(filePath);
   return filePath;
+});
+
+// User-data dir: <appData>/<appName>/. Used as the root for cross-project
+// libraries (texture bank, emitter presets) that should outlive any single
+// project folder.
+ipcMain.handle('app:getUserDataPath', async () => {
+  return app.getPath('userData');
+});
+
+// List filenames in a directory (no recursion). Returns [] when the dir
+// doesn't exist so callers don't have to special-case first-run.
+ipcMain.handle('fs:listDir', async (_, dirPath: string) => {
+  try {
+    const entries = await readdir(dirPath);
+    return entries;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw err;
+  }
+});
+
+ipcMain.handle('fs:pathExists', async (_, p: string) => {
+  try {
+    await stat(p);
+    return true;
+  } catch {
+    return false;
+  }
 });
 
 ipcMain.handle('gemini:saveKey', async (_, key: string) => {

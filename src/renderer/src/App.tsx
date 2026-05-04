@@ -8,8 +8,8 @@ import { GuidesOverlay } from './components/slice/GuidesOverlay';
 import { BoxesOverlay, type BoxesTool } from './components/slice/BoxesOverlay';
 import { SelectOverlay, type SelectTool } from './components/SelectOverlay';
 import { SourcesSidebar } from './components/SourcesSidebar';
-import { BuilderView, type SelectedCell } from './components/BuilderView';
-import { BuilderSidebar } from './components/BuilderSidebar';
+import type { SelectedCell } from './lib/builder';
+import { BuilderLayout } from './components/builder/BuilderLayout';
 import { GeneratePage } from './components/GeneratePage';
 import { TestPage } from './components/TestPage';
 import {
@@ -21,6 +21,15 @@ import {
   type Slot,
 } from './lib/builder';
 import { composeAnimationStrip, safeAnimationFilename } from './lib/builderExport';
+import {
+  buildAnimationParticleJson,
+  buildProjectParticleJson,
+  bundleBankTextures,
+  dirname as particlesDirname,
+  encodeJsonBytes as encodeParticlesJsonBytes,
+  joinPath as particlesJoinPath,
+  safeProjectFilename,
+} from './lib/particlesExport';
 import {
   addRecentFolder,
   listRecentFolders,
@@ -63,6 +72,28 @@ import {
 } from './lib/slicing';
 import { applyPolygonMask, type Point } from './lib/lasso';
 import { loadPresets, savePresets, type SavedPreset } from './lib/presets';
+import { seedIfNeeded as seedParticleBuiltins } from './lib/particles/seedBuiltins';
+import {
+  DEFAULT_PLATFORM_PROJECT,
+  defaultSliceBorders,
+  derivePlatformFilename,
+  newPlatformAssetId,
+  type PlatformAsset,
+  type PlatformProject,
+} from './lib/platforms';
+import {
+  addRecentPlatformFolder,
+  dirnameOf,
+  findPlatformProjectFolder,
+  joinPath as platformJoinPath,
+  listRecentPlatformFolders,
+  loadPlatformProject,
+  removeRecentPlatformFolder,
+  savePlatformProject,
+  type SaveAssetInput as PlatformSaveAssetInput,
+} from './lib/platformProject';
+import { PlatformsView } from './components/platforms/PlatformsView';
+import { upscaleImageData } from './lib/upscale';
 
 export function App() {
   // Destructure the stable callbacks/ref-readers from useSources so downstream
@@ -189,6 +220,25 @@ export function App() {
   >(() => listRecentFolders());
   const refreshRecent = useCallback(() => setRecentFoldersState(listRecentFolders()), []);
 
+  // Platforms mode state — independent project + asset library that survives
+  // mode switches. assetImages is a separate Map<id, ImageData> rather than
+  // embedded in the project so the manifest stays cleanly serializable.
+  const [platformProject, setPlatformProject] = useState<PlatformProject>(
+    DEFAULT_PLATFORM_PROJECT,
+  );
+  const [platformAssetImages, setPlatformAssetImages] = useState<Map<string, ImageData>>(
+    new Map(),
+  );
+  const [platformProjectName, setPlatformProjectName] = useState<string>('');
+  const [platformProjectFolder, setPlatformProjectFolder] = useState<string | null>(null);
+  const [platformRecentFolders, setPlatformRecentFoldersState] = useState(() =>
+    listRecentPlatformFolders(),
+  );
+  const refreshPlatformRecent = useCallback(
+    () => setPlatformRecentFoldersState(listRecentPlatformFolders()),
+    [],
+  );
+
   // Remove-BG color swatches — persisted in localStorage so they survive
   // restarts. 12 slots seems like a nice middle ground.
   const [bgSwatches, setBgSwatchesState] = useState<(RGB | null)[]>(() => {
@@ -239,6 +289,14 @@ export function App() {
   }, []);
 
   useEffect(() => setPresets(loadPresets()), []);
+
+  // First-run seeding for the cross-project particle library (textures + emitter
+  // presets). Idempotent across runs via an internal localStorage flag.
+  useEffect(() => {
+    seedParticleBuiltins().catch((err) =>
+      console.error('[particles] built-in seeding failed:', err),
+    );
+  }, []);
 
   // ---------- Ingestion ----------
 
@@ -497,6 +555,273 @@ export function App() {
     [refreshRecent],
   );
 
+  // ---------- Platforms project ----------
+
+  const handlePlatformProjectNew = useCallback(() => {
+    setPlatformProject(DEFAULT_PLATFORM_PROJECT);
+    setPlatformAssetImages(new Map());
+    setPlatformProjectName('');
+    setPlatformProjectFolder(null);
+  }, []);
+
+  const handlePlatformProjectSave = useCallback(
+    async (name: string, saveMode: 'overwrite' | 'new' = 'overwrite') => {
+      const trimmed = name.trim();
+      if (!trimmed) return;
+      let targetFolder: string;
+      let nest: boolean;
+      if (saveMode === 'overwrite' && platformProjectFolder) {
+        targetFolder = platformProjectFolder;
+        nest = false;
+      } else {
+        const picked = await window.api.openFolder();
+        if (!picked) return;
+        targetFolder = picked;
+        nest = true;
+      }
+      const saveAssets: PlatformSaveAssetInput[] = [];
+      for (const a of platformProject.assets) {
+        const img = platformAssetImages.get(a.id);
+        if (!img) continue;
+        saveAssets.push({ asset: a, image: img });
+      }
+      const { projectFolder: actualFolder } = await savePlatformProject(
+        { name: trimmed, folderPath: targetFolder, assets: saveAssets },
+        { nestInSubfolder: nest },
+      );
+      setPlatformProjectName(trimmed);
+      setPlatformProjectFolder(actualFolder);
+      addRecentPlatformFolder(actualFolder, trimmed);
+      refreshPlatformRecent();
+    },
+    [platformProject, platformAssetImages, platformProjectFolder, refreshPlatformRecent],
+  );
+
+  const handlePlatformProjectLoad = useCallback(
+    async (folderPath?: string) => {
+      let pickedFolder = folderPath;
+      if (!pickedFolder) {
+        pickedFolder = (await window.api.openFolder()) ?? undefined;
+        if (!pickedFolder) return;
+      }
+      // Locate the actual project folder. Picking the parent of a renamed
+      // project still works as long as platforms.json sits one level deep.
+      const folder = await findPlatformProjectFolder(pickedFolder);
+      if (!folder) {
+        alert(`No platforms.json found in:\n${pickedFolder}\nor any direct subfolder.`);
+        removeRecentPlatformFolder(pickedFolder);
+        refreshPlatformRecent();
+        return;
+      }
+      const result = await loadPlatformProject(folder);
+      if (!result) {
+        alert(`No platforms.json found in:\n${folder}`);
+        removeRecentPlatformFolder(folder);
+        refreshPlatformRecent();
+        return;
+      }
+      setPlatformProject(result.project);
+      setPlatformAssetImages(result.assetImages);
+      setPlatformProjectName(result.project.name);
+      setPlatformProjectFolder(folder);
+      addRecentPlatformFolder(folder, result.project.name);
+      refreshPlatformRecent();
+      if (result.missing.length > 0) {
+        console.warn('[platforms] missing files:', result.missing);
+      }
+    },
+    [refreshPlatformRecent],
+  );
+
+  /** Load by pointing directly at a `platforms.json` file. The actual
+   *  project folder is the file's parent directory, so this works even when
+   *  the folder has been renamed since the recents list was last updated. */
+  const handlePlatformProjectLoadFile = useCallback(async () => {
+    const file = await window.api.openSpecificFile({
+      title: 'Open platforms.json',
+      filterName: 'Platforms project',
+      extensions: ['json'],
+    });
+    if (!file) return;
+    await handlePlatformProjectLoad(dirnameOf(file));
+  }, [handlePlatformProjectLoad]);
+
+  const handlePlatformRecentRemove = useCallback(
+    (folder: string) => {
+      removeRecentPlatformFolder(folder);
+      refreshPlatformRecent();
+    },
+    [refreshPlatformRecent],
+  );
+
+  const handleAddPlatformAsset = useCallback((image: ImageData) => {
+    // Generate the id outside the setter so we can use it in both updates
+    // without racing against an intermediate render.
+    const id = newPlatformAssetId();
+    setPlatformProject((p) => {
+      const filename = derivePlatformFilename(
+        { biome: 'DEPTHS', type: 'STANDARD' },
+        p.assets,
+      );
+      const newAsset: PlatformAsset = {
+        id,
+        filename,
+        biome: 'DEPTHS',
+        type: 'STANDARD',
+        slice: defaultSliceBorders(image.width),
+        width: image.width,
+        height: image.height,
+      };
+      return { ...p, assets: [...p.assets, newAsset] };
+    });
+    setPlatformAssetImages((m) => {
+      const next = new Map(m);
+      next.set(id, image);
+      return next;
+    });
+  }, []);
+
+  const handleUpdatePlatformAsset = useCallback(
+    (id: string, patch: Partial<PlatformAsset>) => {
+      // Stamp lastModifiedMs on every patch so the library highlight reflects
+      // the most recent edit. The caller can override by including a value
+      // in `patch` (e.g. when batch-updating without changing the timestamp).
+      const stamped: Partial<PlatformAsset> = {
+        lastModifiedMs: Date.now(),
+        ...patch,
+      };
+      setPlatformProject((p) => ({
+        ...p,
+        assets: p.assets.map((a) => (a.id === id ? { ...a, ...stamped } : a)),
+      }));
+    },
+    [],
+  );
+
+  const handleRemovePlatformAsset = useCallback((id: string) => {
+    setPlatformProject((p) => ({
+      ...p,
+      assets: p.assets.filter((a) => a.id !== id),
+    }));
+    setPlatformAssetImages((m) => {
+      const next = new Map(m);
+      next.delete(id);
+      return next;
+    });
+  }, []);
+
+  /**
+   * Batch-upscale every library asset using the bundled ESRGAN model. The
+   * upscaled PNG is written back to disk (replacing the original), the
+   * in-memory ImageData is updated, and the asset's width/height are
+   * stamped to the new dims so subsequent UI/export math reflects reality.
+   *
+   * Skips assets without an in-memory ImageData (shouldn't happen unless
+   * the asset's PNG failed to load) and assets whose project hasn't been
+   * saved yet (we need a folder to write into).
+   */
+  const handlePlatformUpscaleAll = useCallback(
+    async (
+      onProgress: (current: number, total: number, filename: string) => void,
+      shouldCancel: () => boolean,
+      assetIds?: ReadonlySet<string>,
+    ) => {
+      if (!platformProjectFolder) {
+        alert(
+          'Save the project to a folder first — the upscaler writes new PNGs back to disk.',
+        );
+        return;
+      }
+      const assets = assetIds
+        ? platformProject.assets.filter((a) => assetIds.has(a.id))
+        : platformProject.assets;
+      // Phase 0: report "warming up" so the UI shows something during the
+      // model's first-use load (~80MB download/parse).
+      onProgress(0, assets.length, '(loading model…)');
+      const folder = platformProjectFolder;
+      let writes = 0;
+      let failures = 0;
+      const failureLog: string[] = [];
+      for (let i = 0; i < assets.length; i++) {
+        if (shouldCancel()) break;
+        const asset = assets[i];
+        const img = platformAssetImages.get(asset.id);
+        if (!img) {
+          onProgress(i + 1, assets.length, `${asset.filename} (skipped — no image)`);
+          continue;
+        }
+        onProgress(i, assets.length, asset.filename);
+        let upscaled: ImageData;
+        try {
+          upscaled = await upscaleImageData(img);
+        } catch (err) {
+          console.error('[upscale] model failed for', asset.filename, err);
+          failureLog.push(`${asset.filename}: ${(err as Error).message ?? err}`);
+          failures++;
+          onProgress(i + 1, assets.length, `${asset.filename} (model failed)`);
+          continue;
+        }
+        const path = platformJoinPath(folder, asset.filename);
+        try {
+          const bytes = await imageDataToPngBytes(upscaled);
+          await window.api.writeFile(path, bytes);
+          // Per-write log so the user can confirm in DevTools that files
+          // are actually being replaced on disk (and at what new size).
+          console.log(
+            `[upscale] wrote ${path} ${img.width}×${img.height} → ${upscaled.width}×${upscaled.height} (${(bytes.byteLength / 1024).toFixed(0)}KB)`,
+          );
+          writes++;
+        } catch (err) {
+          console.error('[upscale] write failed for', path, err);
+          failureLog.push(`${asset.filename}: write failed — ${(err as Error).message ?? err}`);
+          failures++;
+          onProgress(i + 1, assets.length, `${asset.filename} (write failed)`);
+          continue;
+        }
+        // Update in-memory ImageData so subsequent renders use the new
+        // resolution without a manual reload.
+        setPlatformAssetImages((m) => {
+          const next = new Map(m);
+          next.set(asset.id, upscaled);
+          return next;
+        });
+        // Stamp new dims + lastModified on the asset so the library
+        // highlight reflects the change and downstream sizing math is
+        // accurate.
+        handleUpdatePlatformAsset(asset.id, {
+          width: upscaled.width,
+          height: upscaled.height,
+        });
+        onProgress(i + 1, assets.length, asset.filename);
+        // Brief pause between assets — gives the renderer a chance to
+        // paint the progress update and lets tfjs's GPU resources settle
+        // before the next inference.
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      // Final summary so the user knows the result without having to
+      // sift the DevTools console.
+      const summary = `Upscale finished: ${writes} written, ${failures} failed${shouldCancel() ? ' (cancelled)' : ''}.`;
+      console.log(`[upscale] ${summary}`);
+      if (failures > 0) {
+        alert(
+          `${summary}\n\n` +
+            failureLog.slice(0, 8).join('\n') +
+            (failureLog.length > 8 ? `\n…and ${failureLog.length - 8} more.` : ''),
+        );
+      } else if (writes > 0) {
+        // Quiet success — log only.
+      } else {
+        alert(`Upscale produced no writes. Check the DevTools console for details.`);
+      }
+    },
+    [
+      platformProject.assets,
+      platformProjectFolder,
+      platformAssetImages,
+      handleUpdatePlatformAsset,
+    ],
+  );
+
   const handleExpandCanvas = useCallback(
     (target: number) => {
       if (!activeId) return;
@@ -722,6 +1047,27 @@ export function App() {
       );
     }
   }, [active, activeImage, activeSlice, cells]);
+
+  // Export each cell as its raw bounding-box PNG — no normalization, no flip
+  // overrides, no padding, no trim. The PNG is exactly `rect.width × rect.height`
+  // and contains the source pixels under that rect verbatim. Useful when the
+  // user wants to ship blobs at their natural size and apply transforms in-engine.
+  const exportRawCells = useCallback(async () => {
+    if (!active || !activeImage || cells.length === 0) return;
+    const folder = await window.api.openFolder();
+    if (!folder) return;
+    const base = active.filename.replace(/\.[^.]+$/, '');
+    const pad = String(cells.length - 1).length;
+    for (let i = 0; i < cells.length; i++) {
+      const rect = cells[i];
+      const raw = extractRect(activeImage, rect.x, rect.y, rect.width, rect.height);
+      const bytes = await imageDataToPngBytes(raw);
+      await window.api.writeFile(
+        joinPath(folder, `${base}_raw_${String(i).padStart(pad, '0')}.png`),
+        bytes,
+      );
+    }
+  }, [active, activeImage, cells]);
 
   const exportAtlas = useCallback(async () => {
     if (!active || !activeImage || !activeSlice || cells.length === 0) return;
@@ -1242,20 +1588,34 @@ export function App() {
     return () => window.removeEventListener('keydown', handler);
   }, [mode, builderSelectedSlot]);
 
-  // Export the active animation as a strip via Save dialog.
+  // Export the active animation as a strip via Save dialog. Also emits the
+  // particles JSON next to it and bundles any referenced bank textures so the
+  // exported folder is self-contained and the runtime can load everything by
+  // looking next to the JSON.
   const exportBuilderStrip = useCallback(async () => {
     const active = getActiveAnimation(builder);
     if (!active) return;
     const bytes = await composeAnimationStrip(active, builder, sourcesList, getSourceImage);
     if (!bytes) return;
-    await window.api.saveImage(
+    const pngPath = await window.api.saveImage(
       `${safeAnimationFilename(active.name, active.fps)}.png`,
       bytes,
     );
+    if (!pngPath) return;
+    // Particles JSON sits next to the strip with a parallel filename.
+    const jsonPath = pngPath.replace(/\.png$/i, '.particles.json');
+    const json = buildAnimationParticleJson(active, builder, sourcesList);
+    await window.api.writeFile(jsonPath, encodeParticlesJsonBytes(json));
+    const dir = particlesDirname(pngPath);
+    const result = await bundleBankTextures(dir, active.emitters ?? []);
+    if (result.missing.length > 0) {
+      console.warn('[particles] missing bank textures during export:', result.missing);
+    }
   }, [builder, sourcesList, getSourceImage]);
 
-  // Export every animation that's ready into the project folder. Used so the
-  // user can keep all strips alongside the project files for re-editing.
+  // Export every animation that's ready into the project folder. Also writes
+  // a single project-wide particles JSON aggregating every animation's
+  // emitters and bundles every referenced bank texture next to it.
   const exportAllAnimationsToProject = useCallback(async () => {
     if (!projectFolder) return;
     const skipped: string[] = [];
@@ -1266,22 +1626,40 @@ export function App() {
         continue;
       }
       const filename = `${safeAnimationFilename(anim.name, anim.fps)}.png`;
-      const sep = projectFolder.includes('\\') ? '\\' : '/';
-      const path = projectFolder.endsWith(sep)
-        ? projectFolder + filename
-        : `${projectFolder}${sep}${filename}`;
-      await window.api.writeFile(path, bytes);
+      await window.api.writeFile(particlesJoinPath(projectFolder, filename), bytes);
+    }
+    // Write the project-wide particles JSON regardless of skipped animations
+    // — it's the source of truth for emitter configs and includes every
+    // animation, even those not yet ready to export as a strip.
+    const projectJson = buildProjectParticleJson(
+      builder,
+      sourcesList,
+      projectName || 'project',
+    );
+    const projectFilename = `${safeProjectFilename(projectName)}.particles.json`;
+    await window.api.writeFile(
+      particlesJoinPath(projectFolder, projectFilename),
+      encodeParticlesJsonBytes(projectJson),
+    );
+    // Bundle every bank texture referenced anywhere in the project.
+    const allEmitters = builder.animations.flatMap((a) => a.emitters ?? []);
+    const bundleResult = await bundleBankTextures(projectFolder, allEmitters);
+    if (bundleResult.missing.length > 0) {
+      console.warn('[particles] missing bank textures during export:', bundleResult.missing);
     }
     if (skipped.length > 0) {
       alert(
         `Skipped ${skipped.length} unfinished animation${skipped.length > 1 ? 's' : ''}:\n` +
           skipped.map((n) => `• ${n}`).join('\n') +
-          `\n\n(Need a scale lock + every slot filled to export.)`,
+          `\n\n(Need a scale lock + every slot filled to export the strip.)\n\n` +
+          `Wrote ${projectFilename} + ${bundleResult.written.length} bundled texture(s).`,
       );
     } else {
-      alert(`Exported ${builder.animations.length} animation strip(s) into:\n${projectFolder}`);
+      alert(
+        `Exported ${builder.animations.length} animation strip(s) + ${projectFilename} + ${bundleResult.written.length} bundled texture(s) into:\n${projectFolder}`,
+      );
     }
-  }, [builder, sourcesList, getSourceImage, projectFolder]);
+  }, [builder, sourcesList, getSourceImage, projectFolder, projectName]);
 
   const runtime = activeId ? getRuntime(activeId) : null;
   const floater = runtime?.floater ?? null;
@@ -1385,47 +1763,57 @@ export function App() {
             sources={sourcesList}
             getSource={getSourceImage}
           />
+        ) : mode === 'platforms' ? (
+          <PlatformsView
+            project={platformProject}
+            assetImages={platformAssetImages}
+            sources={sourcesList}
+            getSource={getSourceImage}
+            onAddAsset={handleAddPlatformAsset}
+            onUpdateAsset={handleUpdatePlatformAsset}
+            onRemoveAsset={handleRemovePlatformAsset}
+            projectName={platformProjectName}
+            projectFolder={platformProjectFolder}
+            recentFolders={platformRecentFolders}
+            onProjectSave={(n) => handlePlatformProjectSave(n, 'overwrite')}
+            onProjectSaveAs={(n) => handlePlatformProjectSave(n, 'new')}
+            onProjectLoad={handlePlatformProjectLoad}
+            onProjectLoadFile={handlePlatformProjectLoadFile}
+            onProjectLoadRecent={handlePlatformProjectLoad}
+            onRecentRemove={handlePlatformRecentRemove}
+            onProjectNew={handlePlatformProjectNew}
+            onUpscaleAll={handlePlatformUpscaleAll}
+          />
         ) : mode === 'builder' ? (
-          <>
-            <BuilderView
-              state={builder}
-              onStateChange={setBuilder}
-              sources={sourcesList}
-              getSource={getSourceImage}
-              selectedCell={builderSelectedCell}
-              onSelectCell={setBuilderSelectedCell}
-              selectedSlotIndex={builderSelectedSlot}
-              onSelectSlot={setBuilderSelectedSlot}
-              onRecordPlacement={recordPlacement}
-            />
-            <BuilderSidebar
-              state={builder}
-              onStateChange={setBuilder}
-              sources={sourcesList}
-              getSource={getSourceImage}
-              selectedCell={builderSelectedCell}
-              selectedSlotIndex={builderSelectedSlot}
-              onDeselectSlot={() => setBuilderSelectedSlot(null)}
-              onDeselectCell={() => setBuilderSelectedCell(null)}
-              onExport={exportBuilderStrip}
-              onExportAllToProject={exportAllAnimationsToProject}
-              hasProjectFolder={!!projectFolder}
-              onRecordPlacement={recordPlacement}
-              onUndoPlacement={undoPlacement}
-              onRedoPlacement={redoPlacement}
-              canUndoPlacement={canUndoPlacement}
-              canRedoPlacement={canRedoPlacement}
-              projectName={projectName}
-              projectFolder={projectFolder}
-              recentFolders={recentFolders}
-              onProjectSave={(n) => handleProjectSave(n, 'overwrite')}
-              onProjectSaveAs={(n) => handleProjectSave(n, 'new')}
-              onProjectLoad={handleProjectLoad}
-              onProjectLoadRecent={handleProjectLoad}
-              onRecentRemove={handleRecentRemove}
-              onProjectNew={handleProjectNew}
-            />
-          </>
+          <BuilderLayout
+            state={builder}
+            onStateChange={setBuilder}
+            sources={sourcesList}
+            getSource={getSourceImage}
+            selectedCell={builderSelectedCell}
+            onSelectCell={setBuilderSelectedCell}
+            selectedSlotIndex={builderSelectedSlot}
+            onSelectSlot={setBuilderSelectedSlot}
+            onRecordPlacement={recordPlacement}
+            onUndoPlacement={undoPlacement}
+            onRedoPlacement={redoPlacement}
+            canUndoPlacement={canUndoPlacement}
+            canRedoPlacement={canRedoPlacement}
+            onDeselectCell={() => setBuilderSelectedCell(null)}
+            onDeselectSlot={() => setBuilderSelectedSlot(null)}
+            projectName={projectName}
+            projectFolder={projectFolder}
+            recentFolders={recentFolders}
+            onProjectSave={(n) => handleProjectSave(n, 'overwrite')}
+            onProjectSaveAs={(n) => handleProjectSave(n, 'new')}
+            onProjectLoad={handleProjectLoad}
+            onProjectLoadRecent={handleProjectLoad}
+            onRecentRemove={handleRecentRemove}
+            onProjectNew={handleProjectNew}
+            onExport={exportBuilderStrip}
+            onExportAllToProject={exportAllAnimationsToProject}
+            hasProjectFolder={!!projectFolder}
+          />
         ) : (
           <>
             <CanvasView
@@ -1498,6 +1886,7 @@ export function App() {
             selectedCellIndex={active?.selectedCellIndex ?? null}
             onSelectedCellIndexChange={setSelectedCellIndex}
             onExportCells={exportCells}
+            onExportRawCells={exportRawCells}
             onExportAtlas={exportAtlas}
             onAutoDetectBlobs={autoDetectBlobs}
             onAutoDetectBlobsAllSources={autoDetectBlobsAllSources}

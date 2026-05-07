@@ -26,11 +26,15 @@ export interface SidebarProps {
   onPickedColorChange: (c: RGB | null) => void;
   onRemoveGlobal: () => void;
   onRemoveGlobalAllSources: () => void;
+  /** Apply remove only to sources checked in the SourcesSidebar. */
+  onRemoveGlobalSelected: () => void;
   onAutoDetect: () => void;
   onUndo: () => void;
   canUndo: boolean;
   hasImage: boolean;
   sourceCount: number;
+  /** Number of sources currently checked in the SourcesSidebar (color batch selection). */
+  selectedSourceCount: number;
   /** Saved color swatches (persistent in localStorage). */
   swatches: (RGB | null)[];
   onSwatchesChange: (s: (RGB | null)[]) => void;
@@ -45,6 +49,8 @@ export interface SidebarProps {
   onReplaceFillToleranceChange: (n: number) => void;
   onReplaceColor: () => void;
   onReplaceColorAllSources: () => void;
+  /** Apply replace only to sources checked in the SourcesSidebar. */
+  onReplaceColorSelected: () => void;
   /** Saved fill swatches — separate palette from source swatches. */
   fillSwatches: (RGB | null)[];
   onFillSwatchesChange: (s: (RGB | null)[]) => void;
@@ -94,11 +100,13 @@ export function Sidebar(props: SidebarProps) {
     onPickedColorChange,
     onRemoveGlobal,
     onRemoveGlobalAllSources,
+    onRemoveGlobalSelected,
     onAutoDetect,
     onUndo,
     canUndo,
     hasImage,
     sourceCount,
+    selectedSourceCount,
     swatches,
     onSwatchesChange,
     tool,
@@ -111,6 +119,7 @@ export function Sidebar(props: SidebarProps) {
     onReplaceFillToleranceChange,
     onReplaceColor,
     onReplaceColorAllSources,
+    onReplaceColorSelected,
     fillSwatches,
     onFillSwatchesChange,
     replaceMode,
@@ -457,6 +466,17 @@ export function Sidebar(props: SidebarProps) {
                 Apply replace (active)
               </button>
               <button
+                onClick={onReplaceColorSelected}
+                disabled={!pickedColor || !replaceFill || selectedSourceCount === 0}
+                title={
+                  selectedSourceCount === 0
+                    ? 'Check sources in the left sidebar to batch-apply to a subset'
+                    : 'Runs the replace only on sources checked in the left sidebar'
+                }
+              >
+                Apply replace (selected {selectedSourceCount})
+              </button>
+              <button
                 onClick={onReplaceColorAllSources}
                 disabled={!pickedColor || !replaceFill || sourceCount < 2}
                 title={
@@ -476,6 +496,17 @@ export function Sidebar(props: SidebarProps) {
                 disabled={!hasImage || !pickedColor}
               >
                 Remove picked color (active)
+              </button>
+              <button
+                onClick={onRemoveGlobalSelected}
+                disabled={!pickedColor || selectedSourceCount === 0}
+                title={
+                  selectedSourceCount === 0
+                    ? 'Check sources in the left sidebar to batch-apply to a subset'
+                    : 'Runs the picked color + tolerance only on sources checked in the left sidebar'
+                }
+              >
+                Remove picked color (selected {selectedSourceCount})
               </button>
               <button
                 onClick={onRemoveGlobalAllSources}

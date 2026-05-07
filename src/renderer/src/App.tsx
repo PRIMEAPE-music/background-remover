@@ -134,6 +134,24 @@ export function App() {
   const [tolerance, setTolerance] = useState(20);
   const [distanceMode, setDistanceMode] = useState<DistanceMode>('lab');
   const [floodFill, setFloodFill] = useState(false);
+  // Sources picked from the SourcesSidebar (in remove mode) for batch
+  // remove/replace. Independent of `activeId` — a source can be active without
+  // being in the selection, and vice versa.
+  const [colorSelection, setColorSelection] = useState<Set<string>>(() => new Set());
+  const toggleColorSelection = useCallback((id: string) => {
+    setColorSelection((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+  const selectAllColorSources = useCallback(() => {
+    setColorSelection(new Set(sourcesList.map((s) => s.id)));
+  }, [sourcesList]);
+  const clearColorSelection = useCallback(() => {
+    setColorSelection(new Set());
+  }, []);
   // Color tab tool: 'pick' picks + removes colors, 'erase' paints transparency
   // with a circular brush, 'replace' swaps a source color (with tolerance) for
   // a fill color, scaling the per-pixel deviation so shading is preserved.
@@ -289,6 +307,21 @@ export function App() {
   }, []);
 
   useEffect(() => setPresets(loadPresets()), []);
+
+  // Drop selection entries whose source has been removed (or after clearAll).
+  useEffect(() => {
+    setColorSelection((prev) => {
+      if (prev.size === 0) return prev;
+      const live = new Set(sourcesList.map((s) => s.id));
+      let changed = false;
+      const next = new Set<string>();
+      for (const id of prev) {
+        if (live.has(id)) next.add(id);
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [sourcesList]);
 
   // First-run seeding for the cross-project particle library (textures + emitter
   // presets). Idempotent across runs via an internal localStorage flag.
@@ -847,6 +880,28 @@ export function App() {
     }
   }, [pickedColor, tolerance, distanceMode, sourcesList, getSourceImage, pushHistory, setSourceImage]);
 
+  const handleRemoveGlobalSelected = useCallback(() => {
+    if (!pickedColor || colorSelection.size === 0) return;
+    for (const s of sourcesList) {
+      if (!colorSelection.has(s.id)) continue;
+      const img = getSourceImage(s.id);
+      if (!img) continue;
+      const next = cloneImageData(img);
+      removeColorGlobal(next.data, pickedColor, { tolerance, mode: distanceMode });
+      pushHistory(s.id, img);
+      setSourceImage(s.id, next);
+    }
+  }, [
+    pickedColor,
+    colorSelection,
+    tolerance,
+    distanceMode,
+    sourcesList,
+    getSourceImage,
+    pushHistory,
+    setSourceImage,
+  ]);
+
   const applyReplaceTo = useCallback(
     (data: Uint8ClampedArray, source: RGB, fill: RGB) => {
       if (replaceMode === 'hue') {
@@ -900,6 +955,28 @@ export function App() {
   }, [
     pickedColor,
     replaceFill,
+    applyReplaceTo,
+    sourcesList,
+    getSourceImage,
+    pushHistory,
+    setSourceImage,
+  ]);
+
+  const handleReplaceColorSelected = useCallback(() => {
+    if (!pickedColor || !replaceFill || colorSelection.size === 0) return;
+    for (const s of sourcesList) {
+      if (!colorSelection.has(s.id)) continue;
+      const img = getSourceImage(s.id);
+      if (!img) continue;
+      const next = cloneImageData(img);
+      applyReplaceTo(next.data, pickedColor, replaceFill);
+      pushHistory(s.id, img);
+      setSourceImage(s.id, next);
+    }
+  }, [
+    pickedColor,
+    replaceFill,
+    colorSelection,
     applyReplaceTo,
     sourcesList,
     getSourceImage,
@@ -1753,6 +1830,11 @@ export function App() {
           onSelect={setActive}
           onRemove={removeSource}
           getImage={getSourceImage}
+          selectable={mode === 'remove'}
+          selectedIds={colorSelection}
+          onToggleSelected={toggleColorSelection}
+          onSelectAll={selectAllColorSources}
+          onClearSelection={clearColorSelection}
         />
         {mode === 'generate' ? (
           <GeneratePage projectFolder={projectFolder} />
@@ -1851,6 +1933,7 @@ export function App() {
             onPickedColorChange={setPickedColor}
             onRemoveGlobal={handleRemoveGlobal}
             onRemoveGlobalAllSources={handleRemoveGlobalAllSources}
+            onRemoveGlobalSelected={handleRemoveGlobalSelected}
             onAutoDetect={handleAutoDetect}
             onUndo={handleUndo}
             canUndo={(active?.historyLen ?? 0) > 0}
@@ -1868,6 +1951,8 @@ export function App() {
             onReplaceFillToleranceChange={setReplaceFillTolerance}
             onReplaceColor={handleReplaceColor}
             onReplaceColorAllSources={handleReplaceColorAllSources}
+            onReplaceColorSelected={handleReplaceColorSelected}
+            selectedSourceCount={colorSelection.size}
             fillSwatches={fillSwatches}
             onFillSwatchesChange={setFillSwatches}
             replaceMode={replaceMode}

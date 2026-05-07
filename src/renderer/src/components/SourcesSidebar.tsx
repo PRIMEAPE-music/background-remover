@@ -7,6 +7,17 @@ export interface SourcesSidebarProps {
   onSelect: (id: string) => void;
   onRemove: (id: string) => void;
   getImage: (id: string | null) => ImageData | null;
+  /**
+   * When true, render a checkbox on each thumb so the user can include
+   * sources in a multi-source operation (e.g. batch color remove/replace).
+   * The body of the thumb still activates the source on click — the checkbox
+   * is independent of which source is currently active.
+   */
+  selectable?: boolean;
+  selectedIds?: ReadonlySet<string>;
+  onToggleSelected?: (id: string) => void;
+  onSelectAll?: () => void;
+  onClearSelection?: () => void;
 }
 
 export function SourcesSidebar({
@@ -15,6 +26,11 @@ export function SourcesSidebar({
   onSelect,
   onRemove,
   getImage,
+  selectable = false,
+  selectedIds,
+  onToggleSelected,
+  onSelectAll,
+  onClearSelection,
 }: SourcesSidebarProps) {
   if (sources.length === 0) {
     return (
@@ -37,6 +53,7 @@ export function SourcesSidebar({
       </aside>
     );
   }
+  const selectedCount = selectedIds?.size ?? 0;
   return (
     <aside
       style={{
@@ -50,6 +67,39 @@ export function SourcesSidebar({
         overflowY: 'auto',
       }}
     >
+      {selectable && (
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 4,
+            paddingBottom: 6,
+            borderBottom: '1px solid var(--border)',
+          }}
+        >
+          <div style={{ fontSize: 10, color: 'var(--text-dim)', textAlign: 'center' }}>
+            {selectedCount}/{sources.length} selected
+          </div>
+          <div style={{ display: 'flex', gap: 4 }}>
+            <button
+              onClick={onSelectAll}
+              disabled={selectedCount === sources.length}
+              style={{ flex: 1, fontSize: 10, padding: '2px 4px' }}
+              title="Select all sources"
+            >
+              All
+            </button>
+            <button
+              onClick={onClearSelection}
+              disabled={selectedCount === 0}
+              style={{ flex: 1, fontSize: 10, padding: '2px 4px' }}
+              title="Clear selection"
+            >
+              None
+            </button>
+          </div>
+        </div>
+      )}
       {sources.map((s) => (
         <SourceThumb
           key={s.id}
@@ -58,6 +108,9 @@ export function SourcesSidebar({
           onSelect={onSelect}
           onRemove={onRemove}
           getImage={getImage}
+          selectable={selectable}
+          selected={selectedIds?.has(s.id) ?? false}
+          onToggleSelected={onToggleSelected}
         />
       ))}
     </aside>
@@ -70,12 +123,18 @@ const SourceThumb = memo(function SourceThumb({
   onSelect,
   onRemove,
   getImage,
+  selectable,
+  selected,
+  onToggleSelected,
 }: {
   source: SourceMeta;
   active: boolean;
   onSelect: (id: string) => void;
   onRemove: (id: string) => void;
   getImage: (id: string | null) => ImageData | null;
+  selectable: boolean;
+  selected: boolean;
+  onToggleSelected?: (id: string) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const lastVersion = useRef<number>(-1);
@@ -132,7 +191,10 @@ const SourceThumb = memo(function SourceThumb({
         padding: 4,
         cursor: 'pointer',
         background: active ? 'rgba(106,169,255,0.15)' : 'transparent',
-        border: `1px solid ${active ? '#6aa9ff' : 'var(--border)'}`,
+        border: `1px solid ${
+          selectable && selected ? '#8de08d' : active ? '#6aa9ff' : 'var(--border)'
+        }`,
+        boxShadow: selectable && selected ? '0 0 0 1px #8de08d inset' : undefined,
       }}
     >
       <canvas
@@ -160,6 +222,32 @@ const SourceThumb = memo(function SourceThumb({
       >
         {source.filename}
       </div>
+      {selectable && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleSelected?.(source.id);
+          }}
+          title={selected ? 'Remove from color selection' : 'Add to color selection'}
+          style={{
+            position: 'absolute',
+            top: 2,
+            left: 2,
+            width: 16,
+            height: 16,
+            padding: 0,
+            fontSize: 11,
+            lineHeight: 1,
+            background: selected ? '#8de08d' : 'rgba(0,0,0,0.5)',
+            border: `1px solid ${selected ? '#8de08d' : 'var(--border)'}`,
+            color: selected ? '#0a0a0a' : '#e6e6ea',
+            borderRadius: 2,
+            fontWeight: 700,
+          }}
+        >
+          {selected ? '✓' : ''}
+        </button>
+      )}
       <button
         onClick={(e) => {
           e.stopPropagation();

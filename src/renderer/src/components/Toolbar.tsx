@@ -4,6 +4,7 @@ export type ViewMode =
   | 'slice'
   | 'builder'
   | 'platforms'
+  | 'decorations'
   | 'generate'
   | 'test';
 
@@ -37,13 +38,18 @@ export function Toolbar({ filename, hasImage, mode, onModeChange, onOpen, onSave
       <div style={{ width: 1, height: 22, background: 'var(--border)', margin: '0 6px' }} />
 
       <div style={{ display: 'flex', gap: 4 }}>
-        {(['remove', 'select', 'slice', 'builder', 'platforms', 'generate', 'test'] as const).map((m) => {
-          // Builder, Platforms, Generate and Test are always reachable. Builder
-          // and Test operate on the loaded project's animations without needing
-          // an active sheet; Platforms has its own asset library independent
-          // of any source sheet; Generate produces images from scratch.
+        {(['remove', 'select', 'slice', 'builder', 'platforms', 'decorations', 'generate', 'test'] as const).map((m) => {
+          // Builder, Platforms, Decorations, Generate and Test are always
+          // reachable. Builder and Test operate on the loaded project's
+          // animations without needing an active sheet; Platforms and
+          // Decorations have their own asset libraries independent of any
+          // source sheet; Generate produces images from scratch.
           const alwaysReachable =
-            m === 'builder' || m === 'platforms' || m === 'generate' || m === 'test';
+            m === 'builder' ||
+            m === 'platforms' ||
+            m === 'decorations' ||
+            m === 'generate' ||
+            m === 'test';
           return (
             <button
               key={m}
@@ -67,9 +73,11 @@ export function Toolbar({ filename, hasImage, mode, onModeChange, onOpen, onSave
                       ? 'Builder'
                       : m === 'platforms'
                         ? 'Platforms'
-                        : m === 'generate'
-                          ? 'Generate'
-                          : 'Test'}
+                        : m === 'decorations'
+                          ? 'Decorations'
+                          : m === 'generate'
+                            ? 'Generate'
+                            : 'Test'}
             </button>
           );
         })}

@@ -94,6 +94,60 @@ export const SIZE_CATEGORIES: readonly SizeCategory[] = [
   'FLOOR',
 ];
 
+/**
+ * Authored walkable surface in SOURCE pixel coords. The TOP edge of the
+ * rectangle is the walking surface the player stands on; the height is
+ * the collision-band depth (typically 32 — matches AscensionGame's
+ * default `collisionHeight`).
+ *
+ * `rightTopOffset` lets the top edge TILT — the top-left corner stays at
+ * `(x, y)` while the top-right corner moves to `(x + width, y + rightTopOffset)`.
+ * Positive = right side lower (slope down to the right); negative = right
+ * side higher. Used for platforms drawn in perspective whose visible top
+ * face is a tilted parallelogram. The bottom edge stays parallel to the
+ * top so the region remains a parallelogram rather than a general quad.
+ *
+ * Multiple regions per asset support uneven ground (multiple plateaus
+ * at different heights) and bridges (gap in the middle of one platform).
+ * The runtime creates one collision body per region (multiple stair-stepped
+ * bodies when `rightTopOffset` is non-zero so the slope reads in physics).
+ */
+export interface WalkableRegion {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rightTopOffset?: number;
+}
+
+/** A single hand-placed decoration on a specific platform asset.
+ *  References a decoration by id (must match an entry in the
+ *  decoration project) and pins it to a fixed source-pixel position
+ *  on the platform. Authoring this lets the artist pick "this exact
+ *  mushroom in this exact spot" instead of relying on procedural
+ *  scatter for every flora visual. */
+export interface AuthoredDecoration {
+  decorationId: string;
+  /** Anchor point in SOURCE pixels of the platform's frame. The
+   *  decoration's `anchor` field determines what part of the sprite
+   *  gets pinned here (bottom-center for "bottom" anchored, top-center
+   *  for "underside" placements, etc.). */
+  x: number;
+  y: number;
+}
+
+/** Optional rectangular footprint (SOURCE pixels) describing the
+ *  platform's silhouette for shadow casting. Defaults to the union of
+ *  walkableRegions. Author when the visible silhouette is wider than
+ *  the standable area (overhangs) and the shadow should match the
+ *  silhouette rather than just the walkable bands. */
+export interface WalkableHull {
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+}
+
 export interface PlatformAsset {
   id: string;
   /** PNG filename within the project folder. */
@@ -113,6 +167,36 @@ export interface PlatformAsset {
   /** Authoring-only label for size-bucket organization. Persisted to the
    *  manifest so other tools could read it, but AscensionGame ignores it. */
   sizeCategory?: SizeCategory;
+  /** Authored walkable surface bands (SOURCE pixels). When present,
+   *  AscensionGame replaces its body-position heuristic with bodies
+   *  placed exactly at the top edge of each region. */
+  walkableRegions?: WalkableRegion[];
+  /** Optional silhouette bounds for shadow / fall-off (SOURCE pixels).
+   *  Defaults to the union of walkableRegions. */
+  walkableHull?: WalkableHull;
+  /** Optional anchor (SOURCE pixels) for centered overlays — shrine /
+   *  shop icons, particle FX. Defaults to the centroid of walkableRegions
+   *  / walkableHull. */
+  surfaceCenter?: { x: number; y: number };
+  /** Optional decoration scatter zones (SOURCE pixels). When present,
+   *  AscensionGame's decoration scatter restricts placement to the
+   *  union of these rectangles instead of using the walkable regions'
+   *  full horizontal extent. Use this when the visible top of the
+   *  platform has chunks where decorations look bad (e.g. a shrine's
+   *  altar pedestal, a stairs section, a gap between two slabs).
+   *  Empty / missing = scatter uses the walkable regions as-is. */
+  decorationZones?: WalkableRegion[];
+  /** Hand-authored decoration placements (SOURCE pixels). When this
+   *  array is non-empty, the runtime spawns EXACTLY these decorations
+   *  at the configured positions and skips procedural scatter for
+   *  this platform. Use this for one-off "this exact mushroom goes
+   *  in this exact spot" art direction. Coordinates anchor by the
+   *  decoration's own `anchor` rule:
+   *    - bottom-anchored (most): (x, y) = sprite's bottom-center
+   *    - underside / center-anchored: (x, y) = sprite's anchor point
+   *  An empty array means "no authored decorations, fall through to
+   *  scatter." Missing field means the same. */
+  authoredDecorations?: AuthoredDecoration[];
   /** Epoch ms of the last edit. Used to highlight recently-changed assets
    *  in the library so the user can spot what they just touched. Stamped
    *  by the renderer; persisted to the manifest so the highlight survives
@@ -242,6 +326,96 @@ export function isRecentlyModified(
   return a.lastModifiedMs !== undefined && now - a.lastModifiedMs < RECENT_MODIFIED_MS;
 }
 
+/** Strict parse of a single walkable region. Returns null on any
+ *  shape/type problem so callers can filter out bad entries without
+ *  losing the whole array. */
+function parseWalkableRegion(raw: unknown): WalkableRegion | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const o = raw as {
+    x?: unknown; y?: unknown; width?: unknown; height?: unknown;
+    rightTopOffset?: unknown;
+  };
+  if (
+    typeof o.x !== 'number' || !Number.isFinite(o.x) ||
+    typeof o.y !== 'number' || !Number.isFinite(o.y) ||
+    typeof o.width !== 'number' || !Number.isFinite(o.width) || o.width <= 0 ||
+    typeof o.height !== 'number' || !Number.isFinite(o.height) || o.height <= 0
+  ) return null;
+  const region: WalkableRegion = { x: o.x, y: o.y, width: o.width, height: o.height };
+  if (typeof o.rightTopOffset === 'number' && Number.isFinite(o.rightTopOffset) && o.rightTopOffset !== 0) {
+    region.rightTopOffset = o.rightTopOffset;
+  }
+  return region;
+}
+
+function parseWalkableRegions(raw: unknown): WalkableRegion[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out: WalkableRegion[] = [];
+  for (const r of raw) {
+    const parsed = parseWalkableRegion(r);
+    if (parsed) out.push(parsed);
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+function parseWalkableHull(raw: unknown): WalkableHull | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const o = raw as { left?: unknown; right?: unknown; top?: unknown; bottom?: unknown };
+  if (
+    typeof o.left !== 'number' || typeof o.right !== 'number' ||
+    typeof o.top !== 'number' || typeof o.bottom !== 'number' ||
+    o.right <= o.left || o.bottom <= o.top
+  ) return undefined;
+  return { left: o.left, right: o.right, top: o.top, bottom: o.bottom };
+}
+
+function parseAuthoredDecorations(raw: unknown): AuthoredDecoration[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out: AuthoredDecoration[] = [];
+  for (const r of raw) {
+    if (!r || typeof r !== 'object') continue;
+    const o = r as { decorationId?: unknown; x?: unknown; y?: unknown };
+    if (
+      typeof o.decorationId !== 'string' ||
+      o.decorationId.length === 0 ||
+      typeof o.x !== 'number' ||
+      !Number.isFinite(o.x) ||
+      typeof o.y !== 'number' ||
+      !Number.isFinite(o.y)
+    ) {
+      continue;
+    }
+    out.push({ decorationId: o.decorationId, x: o.x, y: o.y });
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+function parseSurfaceCenter(raw: unknown): { x: number; y: number } | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const o = raw as { x?: unknown; y?: unknown };
+  if (typeof o.x !== 'number' || typeof o.y !== 'number') return undefined;
+  return { x: o.x, y: o.y };
+}
+
+/** Compute the union bounding box of an asset's walkable regions in
+ *  SOURCE pixels. Returns null when the asset has no walkable regions
+ *  AND no authored hull. */
+export function walkableBoundsSource(
+  a: Pick<PlatformAsset, 'walkableHull' | 'walkableRegions'>,
+): WalkableHull | null {
+  if (a.walkableHull) return a.walkableHull;
+  const regions = a.walkableRegions;
+  if (!regions || regions.length === 0) return null;
+  let left = Infinity, right = -Infinity, top = Infinity, bottom = -Infinity;
+  for (const r of regions) {
+    if (r.x < left) left = r.x;
+    if (r.x + r.width > right) right = r.x + r.width;
+    if (r.y < top) top = r.y;
+    if (r.y + r.height > bottom) bottom = r.y + r.height;
+  }
+  return { left, right, top, bottom };
+}
+
 /**
  * Coerce an arbitrary parsed JSON value into a valid `PlatformProject`. Used
  * on load so manually-edited or out-of-date manifests still open without
@@ -274,6 +448,11 @@ export function migratePlatformProject(raw: unknown): PlatformProject {
       targetWidth: positiveNumberOrUndefined(ao.targetWidth),
       targetHeight: positiveNumberOrUndefined(ao.targetHeight),
       sizeCategory: isSizeCategory(ao.sizeCategory) ? ao.sizeCategory : undefined,
+      walkableRegions: parseWalkableRegions(ao.walkableRegions),
+      walkableHull: parseWalkableHull(ao.walkableHull),
+      surfaceCenter: parseSurfaceCenter(ao.surfaceCenter),
+      decorationZones: parseWalkableRegions(ao.decorationZones),
+      authoredDecorations: parseAuthoredDecorations(ao.authoredDecorations),
       lastModifiedMs: positiveNumberOrUndefined(ao.lastModifiedMs),
     });
   }

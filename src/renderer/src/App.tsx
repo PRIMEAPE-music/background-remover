@@ -93,6 +93,22 @@ import {
   type SaveAssetInput as PlatformSaveAssetInput,
 } from './lib/platformProject';
 import { PlatformsView } from './components/platforms/PlatformsView';
+import { DecorationsView } from './components/decorations/DecorationsView';
+import {
+  DEFAULT_DECORATION_PROJECT,
+  type Decoration,
+  type DecorationProject,
+} from './lib/decorations';
+import {
+  disposeThumbnails,
+  loadDecorationProject,
+  saveDecorationProject,
+} from './lib/decorationsProject';
+import {
+  syncDecorationsForFolder,
+  bulkDetectBottomPadding,
+  bulkDetectUnderside,
+} from './lib/decorationsAutoDetect';
 import { upscaleImageData } from './lib/upscale';
 
 export function App() {
@@ -256,6 +272,20 @@ export function App() {
     () => setPlatformRecentFoldersState(listRecentPlatformFolders()),
     [],
   );
+
+  // Decorations mode state — independent project folder. The sprites
+  // can live anywhere (builder project, raw export folder, AscensionGame
+  // assets folder), so Decorations mode tracks its own folder rather
+  // than piggybacking on Platforms. Auto-loads from the Platforms
+  // folder on open as a convenience when decorations.json sits there,
+  // but can also be pointed at a separate folder via the "Open" buttons.
+  const [decorationProject, setDecorationProject] = useState<DecorationProject | null>(null);
+  const [decorationProjectFolder, setDecorationProjectFolder] = useState<string | null>(null);
+  const [decorationThumbnails, setDecorationThumbnails] = useState<Map<string, string>>(
+    new Map(),
+  );
+  const [decorationSaveStatus, setDecorationSaveStatus] =
+    useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
 
   // Remove-BG color swatches — persisted in localStorage so they survive
   // restarts. 12 slots seems like a nice middle ground.
@@ -662,7 +692,36 @@ export function App() {
       if (result.missing.length > 0) {
         console.warn('[platforms] missing files:', result.missing);
       }
+      // Convenience: if the platforms folder ALSO contains a
+      // decorations.json, auto-load it. Decoration sprites usually live
+      // in the builder project rather than the platforms project — but
+      // when both happen to share a folder, this saves an extra click.
+      // Decorations mode also has its own "Open decorations.json…"
+      // button for the common case where the two are separate.
+      try {
+        disposeThumbnails(decorationThumbnails);
+        const decoResult = await loadDecorationProject(folder);
+        if (decoResult) {
+          setDecorationProject(decoResult.project);
+          setDecorationProjectFolder(folder);
+          setDecorationThumbnails(decoResult.thumbnails);
+          if (decoResult.missing.length > 0) {
+            console.warn('[decorations] missing files:', decoResult.missing);
+          }
+          setDecorationSaveStatus('idle');
+        }
+        // No decorations.json here? Leave any previously-loaded
+        // decoration project intact — the user may have explicitly
+        // opened decorations from a different folder and is just
+        // switching between platforms projects.
+      } catch (err) {
+        console.warn('[decorations] auto-load failed:', err);
+      }
     },
+    // decorationThumbnails purposefully omitted — including it would
+    // re-fire the loader every time thumbnails change (which it does
+    // on every load) and create an infinite loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [refreshPlatformRecent],
   );
 
@@ -678,6 +737,256 @@ export function App() {
     if (!file) return;
     await handlePlatformProjectLoad(dirnameOf(file));
   }, [handlePlatformProjectLoad]);
+
+  // ---- Decoration handlers ---------------------------------------------
+
+  const handleUpdateDecoration = useCallback(
+    (id: string, patch: Partial<Decoration>) => {
+      setDecorationProject((prev) => {
+        if (!prev) return prev;
+        let touched = false;
+        const next = prev.decorations.map((d): Decoration => {
+          if (d.id !== id) return d;
+          touched = true;
+          // Spread types are awkward across the discriminated union; the
+          // editor only patches fields that are valid for the asset's
+          // existing kind, so a typed `any` cast is safe and minimal.
+          return { ...d, ...patch } as Decoration;
+        });
+        if (!touched) return prev;
+        return { ...prev, decorations: next };
+      });
+      setDecorationSaveStatus('idle');
+    },
+    [],
+  );
+
+  /** Drop a decoration entry from the manifest. Disposes its thumbnail
+   *  blob URL too so we don't leak object URLs. The PNG on disk is left
+   *  alone — re-running Re-scan will re-add it (auto-classified) unless
+   *  the user manually deletes the file. The user must hit Save to
+   *  persist the removal to disk. */
+  const handleRemoveDecoration = useCallback(
+    (id: string) => {
+      setDecorationProject((prev) => {
+        if (!prev) return prev;
+        const next = prev.decorations.filter((d) => d.id !== id);
+        if (next.length === prev.decorations.length) return prev;
+        return { ...prev, decorations: next };
+      });
+      // Dispose just this entry's thumbnail URL.
+      setDecorationThumbnails((prev) => {
+        const url = prev.get(id);
+        if (!url) return prev;
+        try {
+          URL.revokeObjectURL(url);
+        } catch {
+          /* ignore */
+        }
+        const next = new Map(prev);
+        next.delete(id);
+        return next;
+      });
+      setDecorationSaveStatus('idle');
+    },
+    [],
+  );
+
+  const handleSaveDecorations = useCallback(async () => {
+    if (!decorationProjectFolder || !decorationProject) return;
+    setDecorationSaveStatus('saving');
+    try {
+      await saveDecorationProject(decorationProjectFolder, decorationProject);
+      setDecorationSaveStatus('saved');
+      // Drop "saved" indicator after a moment so it doesn't linger.
+      setTimeout(() => {
+        setDecorationSaveStatus((s) => (s === 'saved' ? 'idle' : s));
+      }, 2000);
+    } catch (err) {
+      console.warn('[decorations] save failed:', err);
+      setDecorationSaveStatus('error');
+    }
+  }, [decorationProjectFolder, decorationProject]);
+
+  const handleReloadDecorations = useCallback(async () => {
+    if (!decorationProjectFolder) return;
+    disposeThumbnails(decorationThumbnails);
+    const result = await loadDecorationProject(decorationProjectFolder);
+    if (result) {
+      setDecorationProject(result.project);
+      setDecorationThumbnails(result.thumbnails);
+    } else {
+      setDecorationProject(null);
+      setDecorationThumbnails(new Map());
+    }
+    setDecorationSaveStatus('idle');
+  }, [decorationProjectFolder, decorationThumbnails]);
+
+  /** Open a decorations.json by either picking a folder (and looking
+   *  for decorations.json inside it) OR picking the JSON file directly.
+   *  Decorations mode uses this for the common case where the
+   *  decoration sprites live somewhere distinct from the platforms
+   *  project (e.g. inside the Builder project, or a raw assets folder). */
+  const handleOpenDecorationFolder = useCallback(async () => {
+    const folder = await window.api.openFolder();
+    if (!folder) return;
+    disposeThumbnails(decorationThumbnails);
+    const result = await loadDecorationProject(folder);
+    if (!result) {
+      alert(`No decorations.json found in:\n${folder}`);
+      return;
+    }
+    setDecorationProject(result.project);
+    setDecorationProjectFolder(folder);
+    setDecorationThumbnails(result.thumbnails);
+    setDecorationSaveStatus('idle');
+    if (result.missing.length > 0) {
+      console.warn('[decorations] missing files:', result.missing);
+    }
+  }, [decorationThumbnails]);
+
+  /** Re-scan the current decoration project folder for new/removed
+   *  PNGs and merge into the manifest. Same logic that runs after a
+   *  Builder export — useful when the user has copied sprites in by
+   *  hand or moved files around. Reloads thumbnails afterward so the
+   *  UI reflects the on-disk state. */
+  const handleRescanDecorations = useCallback(async () => {
+    if (!decorationProjectFolder) return;
+    try {
+      const result = await syncDecorationsForFolder(decorationProjectFolder);
+      if (result) {
+        // Reload from disk so the UI picks up auto-classified additions
+        // and dropped entries.
+        disposeThumbnails(decorationThumbnails);
+        const reloadResult = await loadDecorationProject(decorationProjectFolder);
+        if (reloadResult) {
+          setDecorationProject(reloadResult.project);
+          setDecorationThumbnails(reloadResult.thumbnails);
+        }
+        const parts = [`${result.totalCount} total`];
+        if (result.addedCount > 0) parts.push(`+${result.addedCount} new`);
+        if (result.removedCount > 0) parts.push(`-${result.removedCount} removed`);
+        alert(`Re-scan complete: ${parts.join(', ')}.\n\nManifest: ${result.manifestPath}`);
+      } else {
+        alert(`No decoration content found in:\n${decorationProjectFolder}`);
+      }
+    } catch (err) {
+      console.warn('[decorations] re-scan failed:', err);
+      alert(`Re-scan failed:\n${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, [decorationProjectFolder, decorationThumbnails]);
+
+  /** Scan every sheet decoration's source PNG bottom-up for the
+   *  first opaque row, and stamp the resulting transparent-rows count
+   *  as `visibleBottomPadding` on each entry. Lets the user batch-fix
+   *  the "decoration floats above the platform" problem in one click
+   *  instead of authoring numbers per asset. Preserves existing
+   *  authored values that are LARGER than the detected one (the
+   *  author probably knows better than alpha-scanning when they've
+   *  already set a number). */
+  const handleAutoDetectDecorationPadding = useCallback(async () => {
+    if (!decorationProjectFolder || !decorationProject) return;
+    try {
+      const patches = await bulkDetectBottomPadding(
+        decorationProjectFolder,
+        decorationProject.decorations,
+      );
+      if (patches.size === 0) {
+        alert('No bottom-transparent rows detected in any sheet. Either every PNG is already tight or the alpha scan found nothing — no changes made.');
+        return;
+      }
+      let touched = 0;
+      setDecorationProject((prev) => {
+        if (!prev) return prev;
+        const next = prev.decorations.map((d): Decoration => {
+          const proposed = patches.get(d.id);
+          if (proposed === undefined) return d;
+          // Don't overwrite a larger authored value — the user may
+          // have hand-tuned past the alpha-scan baseline.
+          const current = d.visibleBottomPadding ?? 0;
+          if (current >= proposed) return d;
+          touched += 1;
+          // The cast is safe: we're patching a single optional field
+          // that lives in the DecorationBase contract regardless of
+          // the asset's discriminated kind.
+          return { ...d, visibleBottomPadding: proposed } as Decoration;
+        });
+        return { ...prev, decorations: next };
+      });
+      setDecorationSaveStatus('idle');
+      alert(`Detected padding for ${patches.size} sheet(s); updated ${touched} entries (authored values >= detected were left alone).\nClick Save to persist.`);
+    } catch (err) {
+      console.warn('[decorations] auto-detect padding failed:', err);
+      alert(`Auto-detect failed:\n${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, [decorationProjectFolder, decorationProject]);
+
+  /** Bulk-flip placement → 'underside' for entries whose PNG content
+   *  sits in the TOP portion of the frame (vines, hanging moss, etc.).
+   *  Catches mis-classified entries that the filename-based auto-classifier
+   *  missed because their name doesn't say "vine" — e.g. an entry called
+   *  `flora_5_raw_05.png` that's actually a hanging vine.
+   *
+   *  Only flips topside → underside; entries the user already set to
+   *  underside are left alone. */
+  const handleAutoDetectDecorationUnderside = useCallback(async () => {
+    if (!decorationProjectFolder || !decorationProject) return;
+    try {
+      const flipIds = await bulkDetectUnderside(
+        decorationProjectFolder,
+        decorationProject.decorations,
+      );
+      if (flipIds.size === 0) {
+        alert('No top-heavy PNGs detected. Every entry already has its visible content in the bottom or center of the frame — nothing to flip.');
+        return;
+      }
+      let touched = 0;
+      const flippedNames: string[] = [];
+      setDecorationProject((prev) => {
+        if (!prev) return prev;
+        const next = prev.decorations.map((d): Decoration => {
+          if (!flipIds.has(d.id)) return d;
+          // Don't override an authored 'underside' (would be a no-op
+          // anyway). Only flip topside (default) → underside.
+          if ((d.placement ?? 'topside') === 'underside') return d;
+          touched += 1;
+          flippedNames.push(d.id);
+          return { ...d, placement: 'underside' } as Decoration;
+        });
+        return { ...prev, decorations: next };
+      });
+      setDecorationSaveStatus('idle');
+      const preview = flippedNames.slice(0, 8).join(', ');
+      const more = flippedNames.length > 8 ? ` (+${flippedNames.length - 8} more)` : '';
+      alert(`Detected ${flipIds.size} top-heavy PNG(s); flipped ${touched} entries to placement: underside.\n\n${preview}${more}\n\nClick Save to persist.`);
+    } catch (err) {
+      console.warn('[decorations] auto-detect underside failed:', err);
+      alert(`Auto-detect failed:\n${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, [decorationProjectFolder, decorationProject]);
+
+  const handleOpenDecorationFile = useCallback(async () => {
+    const file = await window.api.openSpecificFile({
+      title: 'Open decorations.json',
+      filterName: 'Decorations project',
+      extensions: ['json'],
+    });
+    if (!file) return;
+    const folder = dirnameOf(file);
+    disposeThumbnails(decorationThumbnails);
+    const result = await loadDecorationProject(folder);
+    if (!result) {
+      alert(`Could not parse decorations.json at:\n${file}`);
+      return;
+    }
+    setDecorationProject(result.project);
+    setDecorationProjectFolder(folder);
+    setDecorationThumbnails(result.thumbnails);
+    setDecorationSaveStatus('idle');
+    if (result.missing.length > 0) {
+      console.warn('[decorations] missing files:', result.missing);
+    }
+  }, [decorationThumbnails]);
 
   const handlePlatformRecentRemove = useCallback(
     (folder: string) => {
@@ -1724,16 +2033,38 @@ export function App() {
     if (bundleResult.missing.length > 0) {
       console.warn('[particles] missing bank textures during export:', bundleResult.missing);
     }
+    // Sync decorations.json. The Builder export drops `*_Nfps.png`
+    // sheets directly into `projectFolder`, which is the same shape
+    // Decorations mode reads. Running the sync after every export
+    // means the manifest stays current with whatever was just written
+    // — new sheets get auto-classified entries, removed sheets are
+    // dropped, and existing user edits (category overrides, behavior
+    // weight tweaks, hazard chains) are preserved verbatim. The sync
+    // also recognizes the `decorations_sheets/` + `decorations_singles/`
+    // sibling layout in case the project folder is structured that way.
+    let decoSyncSummary = '';
+    try {
+      const result = await syncDecorationsForFolder(projectFolder);
+      if (result) {
+        const parts = [`${result.totalCount} decoration${result.totalCount === 1 ? '' : 's'}`];
+        if (result.addedCount > 0) parts.push(`+${result.addedCount} new`);
+        if (result.removedCount > 0) parts.push(`-${result.removedCount} removed`);
+        decoSyncSummary = `\n\nUpdated decorations.json (${parts.join(', ')}).`;
+      }
+    } catch (err) {
+      console.warn('[decorations] sync after export failed:', err);
+    }
+
     if (skipped.length > 0) {
       alert(
         `Skipped ${skipped.length} unfinished animation${skipped.length > 1 ? 's' : ''}:\n` +
           skipped.map((n) => `• ${n}`).join('\n') +
           `\n\n(Need a scale lock + every slot filled to export the strip.)\n\n` +
-          `Wrote ${projectFilename} + ${bundleResult.written.length} bundled texture(s).`,
+          `Wrote ${projectFilename} + ${bundleResult.written.length} bundled texture(s).${decoSyncSummary}`,
       );
     } else {
       alert(
-        `Exported ${builder.animations.length} animation strip(s) + ${projectFilename} + ${bundleResult.written.length} bundled texture(s) into:\n${projectFolder}`,
+        `Exported ${builder.animations.length} animation strip(s) + ${projectFilename} + ${bundleResult.written.length} bundled texture(s) into:\n${projectFolder}${decoSyncSummary}`,
       );
     }
   }, [builder, sourcesList, getSourceImage, projectFolder, projectName]);
@@ -1854,6 +2185,8 @@ export function App() {
             onAddAsset={handleAddPlatformAsset}
             onUpdateAsset={handleUpdatePlatformAsset}
             onRemoveAsset={handleRemovePlatformAsset}
+            decorationProject={decorationProject}
+            decorationThumbnails={decorationThumbnails}
             projectName={platformProjectName}
             projectFolder={platformProjectFolder}
             recentFolders={platformRecentFolders}
@@ -1865,6 +2198,22 @@ export function App() {
             onRecentRemove={handlePlatformRecentRemove}
             onProjectNew={handlePlatformProjectNew}
             onUpscaleAll={handlePlatformUpscaleAll}
+          />
+        ) : mode === 'decorations' ? (
+          <DecorationsView
+            project={decorationProject}
+            projectFolder={decorationProjectFolder}
+            thumbnails={decorationThumbnails}
+            onUpdate={handleUpdateDecoration}
+            onRemove={handleRemoveDecoration}
+            onSave={handleSaveDecorations}
+            onReload={handleReloadDecorations}
+            onOpenFolder={handleOpenDecorationFolder}
+            onOpenFile={handleOpenDecorationFile}
+            onRescan={handleRescanDecorations}
+            onAutoDetectPadding={handleAutoDetectDecorationPadding}
+            onAutoDetectUnderside={handleAutoDetectDecorationUnderside}
+            saveStatus={decorationSaveStatus}
           />
         ) : mode === 'builder' ? (
           <BuilderLayout

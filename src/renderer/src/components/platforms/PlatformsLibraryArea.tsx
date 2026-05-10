@@ -20,9 +20,12 @@ import {
 } from '../../lib/platforms';
 import { computeCells } from '../../lib/slicing';
 import type { SourceMeta } from '../../lib/sources';
+import { detectWalkableRegions } from '../../lib/walkableDetect';
+import type { DecorationProject } from '../../lib/decorations';
 import { GalleryThumb } from '../GalleryThumb';
 import { NineSliceEditor } from './NineSliceEditor';
 import { PlatformThumbnail } from './PlatformThumbnail';
+import { WalkableEditor } from './WalkableEditor';
 
 export interface PlatformsLibraryAreaProps {
   project: PlatformProject;
@@ -32,6 +35,17 @@ export interface PlatformsLibraryAreaProps {
   onAddAsset: (image: ImageData) => void;
   onUpdateAsset: (id: string, patch: Partial<PlatformAsset>) => void;
   onRemoveAsset: (id: string) => void;
+  /** Decoration project (loaded in Decorations mode). The Walkable
+   *  editor's "Decorations" tab uses these entries to populate its
+   *  picker so the user can drop specific decorations onto specific
+   *  platforms. Null = no decoration project loaded; the tab still
+   *  renders but with an empty picker. */
+  decorationProject: DecorationProject | null;
+  /** Source PNG blob URLs for decoration thumbnails, keyed by id —
+   *  same map produced by `loadDecorationProject`. Used for the picker
+   *  thumbnails AND for rendering the placed decoration sprites on
+   *  the platform canvas. */
+  decorationThumbnails: Map<string, string>;
   onUpscaleAll: (
     onProgress: (current: number, total: number, filename: string) => void,
     shouldCancel: () => boolean,
@@ -60,6 +74,8 @@ export function PlatformsLibraryArea({
   onAddAsset,
   onUpdateAsset,
   onRemoveAsset,
+  decorationProject,
+  decorationThumbnails,
   onUpscaleAll,
 }: PlatformsLibraryAreaProps) {
   // Multi-select: shift-click extends a range from the last clicked card,
@@ -78,6 +94,10 @@ export function PlatformsLibraryArea({
   // When set, the library middle-pane swaps from grid to the 9-slice editor
   // for that asset. Sources + Metadata panes stay visible alongside.
   const [editingSliceForId, setEditingSliceForId] = useState<string | null>(null);
+  // Same idea, separate state — the walkable editor swaps the middle pane
+  // for the rectangle-drawing UI. Mutually exclusive with the slice editor;
+  // opening one closes the other.
+  const [editingWalkableForId, setEditingWalkableForId] = useState<string | null>(null);
   const selectedAssets = useMemo(
     () => project.assets.filter((a) => selectedIds.has(a.id)),
     [project.assets, selectedIds],
@@ -92,6 +112,15 @@ export function PlatformsLibraryArea({
   // If the asset being edited got deleted, drop the editor.
   if (editingSliceForId !== null && (!editingAsset || !editingImage)) {
     setEditingSliceForId(null);
+  }
+  const editingWalkableAsset =
+    editingWalkableForId !== null
+      ? project.assets.find((a) => a.id === editingWalkableForId) ?? null
+      : null;
+  const editingWalkableImage =
+    editingWalkableAsset !== null ? assetImages.get(editingWalkableAsset.id) ?? null : null;
+  if (editingWalkableForId !== null && (!editingWalkableAsset || !editingWalkableImage)) {
+    setEditingWalkableForId(null);
   }
 
   const handleAddCell = useCallback(
@@ -218,7 +247,61 @@ export function PlatformsLibraryArea({
         getSource={getSource}
         onAddCell={handleAddCell}
       />
-      {editingAsset && editingImage ? (
+      {/* LibraryPane stays MOUNTED behind any open editor so its scroll
+          position is preserved when the editor closes. CSS display:none
+          collapses it to zero size while keeping the scroll state in
+          the DOM, so re-opening lands you exactly where you were. */}
+      <LibraryPane
+        hidden={!!editingAsset || !!editingWalkableAsset}
+        assets={project.assets}
+        assetImages={assetImages}
+        selectedIds={selectedIds}
+        onAssetClick={handleAssetClick}
+        onOpenPngs={handleOpenPngs}
+        onUpscaleAll={handleUpscaleAll}
+        upscaleScopeLabel={
+          selectedIds.size > 0 ? `Upscale ${selectedIds.size} selected…` : 'Upscale all…'
+        }
+        upscaleProgress={upscaleProgress}
+        onUpscaleCancel={() => {
+          upscaleCancelRef.current = true;
+        }}
+        onAutoDetectSizes={() => {
+          for (const a of project.assets) {
+            // FLOOR is a manual role tag, not a width bucket — never
+            // overwrite it with the auto-detected width category.
+            if (a.sizeCategory === 'FLOOR') continue;
+            const next = categorizeWidth(platformAssetEffectiveWidth(a));
+            if (a.sizeCategory !== next) {
+              onUpdateAsset(a.id, { sizeCategory: next });
+            }
+          }
+        }}
+        onAutoDetectWalkable={() => {
+          // Mass auto-detect — only stamp STANDARD platforms and the
+          // FLOOR role. Walls / slopes / shop / portal / gambling / npc
+          // either don't have a "walkable surface" the player traverses
+          // (walls), have geometry the runtime handles separately
+          // (slopes via slopeManager), or are typically authored
+          // one-off enough that batch detection isn't worth running on
+          // them. The user can still hit "Edit walkable…" on any single
+          // asset to author by hand.
+          for (const a of project.assets) {
+            const eligible = a.type === 'STANDARD' || a.sizeCategory === 'FLOOR';
+            if (!eligible) continue;
+            // Skip assets that already have user-authored regions so a
+            // batch detect doesn't blow away hand-tuned work.
+            if (a.walkableRegions && a.walkableRegions.length > 0) continue;
+            const img = assetImages.get(a.id);
+            if (!img) continue;
+            const detected = detectWalkableRegions(img);
+            if (detected.length > 0) {
+              onUpdateAsset(a.id, { walkableRegions: detected });
+            }
+          }
+        }}
+      />
+      {editingAsset && editingImage && (
         <NineSliceEditor
           asset={editingAsset}
           image={editingImage}
@@ -227,32 +310,15 @@ export function PlatformsLibraryArea({
           }
           onClose={() => setEditingSliceForId(null)}
         />
-      ) : (
-        <LibraryPane
-          assets={project.assets}
-          assetImages={assetImages}
-          selectedIds={selectedIds}
-          onAssetClick={handleAssetClick}
-          onOpenPngs={handleOpenPngs}
-          onUpscaleAll={handleUpscaleAll}
-          upscaleScopeLabel={
-            selectedIds.size > 0 ? `Upscale ${selectedIds.size} selected…` : 'Upscale all…'
-          }
-          upscaleProgress={upscaleProgress}
-          onUpscaleCancel={() => {
-            upscaleCancelRef.current = true;
-          }}
-          onAutoDetectSizes={() => {
-            for (const a of project.assets) {
-              // FLOOR is a manual role tag, not a width bucket — never
-              // overwrite it with the auto-detected width category.
-              if (a.sizeCategory === 'FLOOR') continue;
-              const next = categorizeWidth(platformAssetEffectiveWidth(a));
-              if (a.sizeCategory !== next) {
-                onUpdateAsset(a.id, { sizeCategory: next });
-              }
-            }
-          }}
+      )}
+      {editingWalkableAsset && editingWalkableImage && (
+        <WalkableEditor
+          asset={editingWalkableAsset}
+          image={editingWalkableImage}
+          decorationProject={decorationProject}
+          decorationThumbnails={decorationThumbnails}
+          onChange={(patch) => onUpdateAsset(editingWalkableAsset.id, patch)}
+          onClose={() => setEditingWalkableForId(null)}
         />
       )}
       <MetadataPane
@@ -260,7 +326,14 @@ export function PlatformsLibraryArea({
         selectedAssets={selectedAssets}
         existing={project.assets}
         onUpdate={onUpdateAsset}
-        onEditSlice={(id) => setEditingSliceForId(id)}
+        onEditSlice={(id) => {
+          setEditingWalkableForId(null);
+          setEditingSliceForId(id);
+        }}
+        onEditWalkable={(id) => {
+          setEditingSliceForId(null);
+          setEditingWalkableForId(id);
+        }}
         onRemove={(id) => {
           setSelectedIds((prev) => {
             if (!prev.has(id)) return prev;
@@ -269,12 +342,16 @@ export function PlatformsLibraryArea({
             return next;
           });
           if (editingSliceForId === id) setEditingSliceForId(null);
+          if (editingWalkableForId === id) setEditingWalkableForId(null);
           onRemoveAsset(id);
         }}
         onRemoveMany={(ids) => {
           setSelectedIds(new Set());
           if (editingSliceForId !== null && ids.includes(editingSliceForId)) {
             setEditingSliceForId(null);
+          }
+          if (editingWalkableForId !== null && ids.includes(editingWalkableForId)) {
+            setEditingWalkableForId(null);
           }
           for (const id of ids) onRemoveAsset(id);
         }}
@@ -416,34 +493,49 @@ function SourceRow({
 // ---- Library pane -------------------------------------------------------
 
 function LibraryPane({
+  hidden,
   assets,
   assetImages,
   selectedIds,
   onAssetClick,
   onOpenPngs,
   onAutoDetectSizes,
+  onAutoDetectWalkable,
   onUpscaleAll,
   upscaleScopeLabel,
   upscaleProgress,
   onUpscaleCancel,
 }: {
+  /** When true, the pane keeps its scroll state in the DOM but doesn't
+   *  display — used to hide it behind the 9-slice / walkable editors
+   *  without remounting (which would lose scroll position). */
+  hidden: boolean;
   assets: PlatformAsset[];
   assetImages: Map<string, ImageData>;
   selectedIds: ReadonlySet<string>;
   onAssetClick: (id: string, mods: { shift: boolean; toggle: boolean }) => void;
   onOpenPngs: () => void;
   onAutoDetectSizes: () => void;
+  onAutoDetectWalkable: () => void;
   onUpscaleAll: () => void;
   upscaleScopeLabel: string;
   upscaleProgress: { current: number; total: number; filename: string } | null;
   onUpscaleCancel: () => void;
 }) {
   const upscaling = upscaleProgress !== null;
+  // Count how many assets the mass walkable-detect would actually touch
+  // — STANDARD type or FLOOR role, and not already authored. Surface
+  // the number on the button so it's clear what'll happen.
+  const walkableEligibleCount = assets.filter((a) => {
+    const eligible = a.type === 'STANDARD' || a.sizeCategory === 'FLOOR';
+    if (!eligible) return false;
+    return !a.walkableRegions || a.walkableRegions.length === 0;
+  }).length;
   return (
     <div
       style={{
-        flex: 1,
-        display: 'flex',
+        flex: hidden ? '0 0 0' : 1,
+        display: hidden ? 'none' : 'flex',
         flexDirection: 'column',
         minWidth: 0,
         overflow: 'hidden',
@@ -478,6 +570,14 @@ function LibraryPane({
           disabled={assets.length === 0 || upscaling}
         >
           Auto-detect sizes
+        </button>
+        <button
+          onClick={onAutoDetectWalkable}
+          style={{ fontSize: 11 }}
+          title="Propose a default walkable region for every STANDARD platform and every FLOOR-tagged asset that doesn't already have walkable regions. Skips walls, slopes, shop/portal/gambling/npc, and assets you've already hand-authored."
+          disabled={walkableEligibleCount === 0 || upscaling}
+        >
+          Auto-detect walkable{walkableEligibleCount > 0 ? ` (${walkableEligibleCount})` : ''}
         </button>
         <button
           onClick={onUpscaleAll}
@@ -647,6 +747,7 @@ function MetadataPane({
   existing,
   onUpdate,
   onEditSlice,
+  onEditWalkable,
   onRemove,
   onRemoveMany,
 }: {
@@ -656,6 +757,7 @@ function MetadataPane({
   existing: PlatformAsset[];
   onUpdate: (id: string, patch: Partial<PlatformAsset>) => void;
   onEditSlice: (id: string) => void;
+  onEditWalkable: (id: string) => void;
   onRemove: (id: string) => void;
   onRemoveMany: (ids: string[]) => void;
 }) {
@@ -846,6 +948,29 @@ function MetadataPane({
         <div style={{ fontSize: 10, color: 'var(--text-dim)', lineHeight: 1.4 }}>
           Drag border lines on the source preview, or use the numeric inputs.
           Stretch previews show how the platform reads at common runtime widths.
+        </div>
+      </section>
+
+      <section style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        <label>Walkable surface</label>
+        <div style={{ fontSize: 10, color: 'var(--text-dim)', fontFamily: 'monospace' }}>
+          {asset.walkableRegions && asset.walkableRegions.length > 0
+            ? `${asset.walkableRegions.length} region${asset.walkableRegions.length === 1 ? '' : 's'}${asset.walkableHull ? ' · custom hull' : ''}${asset.surfaceCenter ? ' · custom center' : ''}`
+            : 'none — using runtime fallback'}
+        </div>
+        <button
+          onClick={() => onEditWalkable(asset.id)}
+          className="primary"
+          style={{ fontSize: 11 }}
+          title="Open the walkable-surface editor (drag rectangles, auto-detect, set hull / icon anchor)"
+        >
+          Edit walkable…
+        </button>
+        <div style={{ fontSize: 10, color: 'var(--text-dim)', lineHeight: 1.4 }}>
+          Define the surface(s) the player can stand on. Multiple regions
+          support uneven ground / bridges. Optional silhouette hull
+          controls shadow width; optional surface center anchors shrine /
+          shop icons.
         </div>
       </section>
 

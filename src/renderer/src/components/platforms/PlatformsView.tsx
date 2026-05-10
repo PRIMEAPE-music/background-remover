@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import type { PlatformAsset, PlatformProject } from '../../lib/platforms';
 import type { RecentPlatformFolder } from '../../lib/platformProject';
 import type { SourceMeta } from '../../lib/sources';
+import type { DecorationProject } from '../../lib/decorations';
 import { PlatformsLibraryArea } from './PlatformsLibraryArea';
 
 export interface PlatformsViewProps {
@@ -13,6 +14,12 @@ export interface PlatformsViewProps {
   onAddAsset: (image: ImageData) => void;
   onUpdateAsset: (id: string, patch: Partial<PlatformAsset>) => void;
   onRemoveAsset: (id: string) => void;
+  /** Decoration project from Decorations mode — passed through to the
+   *  Walkable editor's "Decorations" tab so the user can place
+   *  specific decorations on specific platforms. Null when Decorations
+   *  mode hasn't loaded a project. */
+  decorationProject: DecorationProject | null;
+  decorationThumbnails: Map<string, string>;
   // Project file
   projectName: string;
   projectFolder: string | null;
@@ -48,6 +55,8 @@ export function PlatformsView({
   onAddAsset,
   onUpdateAsset,
   onRemoveAsset,
+  decorationProject,
+  decorationThumbnails,
   projectName,
   projectFolder,
   recentFolders,
@@ -90,6 +99,8 @@ export function PlatformsView({
         onAddAsset={onAddAsset}
         onUpdateAsset={onUpdateAsset}
         onRemoveAsset={onRemoveAsset}
+        decorationProject={decorationProject}
+        decorationThumbnails={decorationThumbnails}
         onUpscaleAll={onUpscaleAll}
       />
     </div>

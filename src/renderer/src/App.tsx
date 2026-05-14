@@ -110,6 +110,14 @@ import {
   bulkDetectUnderside,
 } from './lib/decorationsAutoDetect';
 import { upscaleImageData } from './lib/upscale';
+import type { HitboxProject } from './lib/hitboxes';
+import {
+  discoverSheets,
+  disposeSheetUrls,
+  loadHitboxProject,
+  saveHitboxProject,
+} from './lib/hitboxesProject';
+import { HitboxesView } from './components/hitboxes/HitboxesView';
 
 export function App() {
   // Destructure the stable callbacks/ref-readers from useSources so downstream
@@ -285,6 +293,17 @@ export function App() {
     new Map(),
   );
   const [decorationSaveStatus, setDecorationSaveStatus] =
+    useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+
+  // ─── Hitbox project state ─────────────────────────────────────────
+  // One project = one folder = one entity (typically). Sheets are
+  // PNGs matching `*_<fps>fps.png` in the folder + one level of subdirs.
+  const [hitboxProject, setHitboxProject] = useState<HitboxProject | null>(null);
+  const [hitboxProjectFolder, setHitboxProjectFolder] = useState<string | null>(null);
+  const [hitboxSheetUrls, setHitboxSheetUrls] = useState<Map<string, string>>(
+    new Map(),
+  );
+  const [hitboxSaveStatus, setHitboxSaveStatus] =
     useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
 
   // Remove-BG color swatches — persisted in localStorage so they survive
@@ -987,6 +1006,78 @@ export function App() {
       console.warn('[decorations] missing files:', result.missing);
     }
   }, [decorationThumbnails]);
+
+  // ─── Hitbox project handlers ──────────────────────────────────────
+
+  const handleOpenHitboxFolder = useCallback(async () => {
+    const folder = await window.api.openFolder();
+    if (!folder) return;
+    disposeSheetUrls(hitboxSheetUrls);
+    // Try loading existing manifest first; fall back to fresh discovery.
+    const loaded = await loadHitboxProject(folder);
+    if (loaded) {
+      setHitboxProject(loaded.project);
+      setHitboxProjectFolder(folder);
+      setHitboxSheetUrls(loaded.sheetUrls);
+      if (loaded.missing.length > 0) {
+        console.warn('[hitboxes] missing files:', loaded.missing);
+      }
+    } else {
+      const fresh = await discoverSheets(folder);
+      setHitboxProject(fresh.project);
+      setHitboxProjectFolder(folder);
+      setHitboxSheetUrls(fresh.sheetUrls);
+    }
+    setHitboxSaveStatus('idle');
+  }, [hitboxSheetUrls]);
+
+  const handleSaveHitboxes = useCallback(async () => {
+    if (!hitboxProjectFolder || !hitboxProject) return;
+    setHitboxSaveStatus('saving');
+    try {
+      await saveHitboxProject(hitboxProjectFolder, hitboxProject);
+      setHitboxSaveStatus('saved');
+      setTimeout(() => {
+        setHitboxSaveStatus((s) => (s === 'saved' ? 'idle' : s));
+      }, 2000);
+    } catch (err) {
+      console.warn('[hitboxes] save failed:', err);
+      setHitboxSaveStatus('error');
+    }
+  }, [hitboxProjectFolder, hitboxProject]);
+
+  const handleReloadHitboxes = useCallback(async () => {
+    if (!hitboxProjectFolder) return;
+    disposeSheetUrls(hitboxSheetUrls);
+    const result = await loadHitboxProject(hitboxProjectFolder);
+    if (result) {
+      setHitboxProject(result.project);
+      setHitboxSheetUrls(result.sheetUrls);
+    } else {
+      // Manifest was deleted under us — scaffold fresh.
+      const fresh = await discoverSheets(hitboxProjectFolder);
+      setHitboxProject(fresh.project);
+      setHitboxSheetUrls(fresh.sheetUrls);
+    }
+    setHitboxSaveStatus('idle');
+  }, [hitboxProjectFolder, hitboxSheetUrls]);
+
+  const handleRescanHitboxes = useCallback(async () => {
+    if (!hitboxProjectFolder) return;
+    disposeSheetUrls(hitboxSheetUrls);
+    const result = await discoverSheets(
+      hitboxProjectFolder,
+      hitboxProject ?? undefined,
+    );
+    setHitboxProject(result.project);
+    setHitboxSheetUrls(result.sheetUrls);
+    setHitboxSaveStatus('idle');
+  }, [hitboxProjectFolder, hitboxProject, hitboxSheetUrls]);
+
+  const handleHitboxProjectChange = useCallback((next: HitboxProject) => {
+    setHitboxProject(next);
+    setHitboxSaveStatus('idle');
+  }, []);
 
   const handlePlatformRecentRemove = useCallback(
     (folder: string) => {
@@ -2214,6 +2305,18 @@ export function App() {
             onAutoDetectPadding={handleAutoDetectDecorationPadding}
             onAutoDetectUnderside={handleAutoDetectDecorationUnderside}
             saveStatus={decorationSaveStatus}
+          />
+        ) : mode === 'hitboxes' ? (
+          <HitboxesView
+            project={hitboxProject}
+            projectFolder={hitboxProjectFolder}
+            sheetUrls={hitboxSheetUrls}
+            saveStatus={hitboxSaveStatus}
+            onProjectChange={handleHitboxProjectChange}
+            onSave={handleSaveHitboxes}
+            onReload={handleReloadHitboxes}
+            onOpenFolder={handleOpenHitboxFolder}
+            onRescan={handleRescanHitboxes}
           />
         ) : mode === 'builder' ? (
           <BuilderLayout

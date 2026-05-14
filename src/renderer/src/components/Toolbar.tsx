@@ -5,6 +5,7 @@ export type ViewMode =
   | 'builder'
   | 'platforms'
   | 'decorations'
+  | 'hitboxes'
   | 'generate'
   | 'test';
 
@@ -38,16 +39,15 @@ export function Toolbar({ filename, hasImage, mode, onModeChange, onOpen, onSave
       <div style={{ width: 1, height: 22, background: 'var(--border)', margin: '0 6px' }} />
 
       <div style={{ display: 'flex', gap: 4 }}>
-        {(['remove', 'select', 'slice', 'builder', 'platforms', 'decorations', 'generate', 'test'] as const).map((m) => {
-          // Builder, Platforms, Decorations, Generate and Test are always
-          // reachable. Builder and Test operate on the loaded project's
-          // animations without needing an active sheet; Platforms and
-          // Decorations have their own asset libraries independent of any
-          // source sheet; Generate produces images from scratch.
+        {(['remove', 'select', 'slice', 'builder', 'platforms', 'decorations', 'hitboxes', 'generate', 'test'] as const).map((m) => {
+          // Builder, Platforms, Decorations, Hitboxes, Generate and Test
+          // are always reachable. They have their own asset libraries
+          // / project files independent of any active source sheet.
           const alwaysReachable =
             m === 'builder' ||
             m === 'platforms' ||
             m === 'decorations' ||
+            m === 'hitboxes' ||
             m === 'generate' ||
             m === 'test';
           return (
@@ -75,9 +75,11 @@ export function Toolbar({ filename, hasImage, mode, onModeChange, onOpen, onSave
                         ? 'Platforms'
                         : m === 'decorations'
                           ? 'Decorations'
-                          : m === 'generate'
-                            ? 'Generate'
-                            : 'Test'}
+                          : m === 'hitboxes'
+                            ? 'Hitboxes'
+                            : m === 'generate'
+                              ? 'Generate'
+                              : 'Test'}
             </button>
           );
         })}
